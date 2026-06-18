@@ -37,6 +37,29 @@
 #endif
 
 /*
+ * Xcode 15.4 (macOS 14 Sonoma) SDK changes:
+ *   - OSMemoryBarrier() removed from kernel headers
+ *   - kIOMapWriteCombined renamed to kIOMapWriteCombineCache
+ *   - kIOMapInhibitCache  renamed to kIOMapCacheInhibit
+ *   - getDeviceMemoryWithRegister() now takes 1 arg (UInt8 reg)
+ *     → use getDeviceMemoryWithIndex() แทน
+ *   - createMappingInTask() now requires 4 args
+ *
+ *  Define fallback constants/macros ถ้า SDK เก่า
+ */
+#ifndef OSMemoryBarrier
+#define OSMemoryBarrier()  __sync_synchronize()
+#endif
+
+#ifndef kIOMapWriteCombined
+#define kIOMapWriteCombined  kIOMapWriteCombineCache
+#endif
+
+#ifndef kIOMapInhibitCache
+#define kIOMapInhibitCache   kIOMapCacheInhibit
+#endif
+
+/*
  * Macro สำหรับลงทะเบียนคลาสกับ IOKit runtime
  * IOService ทุกตัวต้องมี OSDefineMetaClassAndStructors หนึ่งครั้ง
  */
@@ -1135,8 +1158,7 @@ bool MyIntelGPU::start(IOService *provider)
      *   mapDeviceMemoryWithIndex(0) → IOMemoryMap
      *   → getVirtualAddress() = ioremap equivalent
      */
-    fMMIODesc = fPCIDevice->getDeviceMemoryWithRegister(
-                    kIOPCIMemorySpace64Bit, 0);
+    fMMIODesc = fPCIDevice->getDeviceMemoryWithIndex(0);
     if (!fMMIODesc) {
         IODebug("ERROR: Cannot get BAR0 descriptor");
         goto fail;
@@ -1193,8 +1215,7 @@ bool MyIntelGPU::start(IOService *provider)
      * (BAR1 เป็น optional GSM)
      */
     if (barCount > 2) {
-        fApertureDesc = fPCIDevice->getDeviceMemoryWithRegister(
-                            kIOPCIMemorySpace64Bit, 2);
+        fApertureDesc = fPCIDevice->getDeviceMemoryWithIndex(2);
         if (fApertureDesc && fApertureDesc->getLength() > 0) {
             fApertureDesc->retain();
 
