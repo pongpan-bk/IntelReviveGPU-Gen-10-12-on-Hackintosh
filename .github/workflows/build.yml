@@ -41,12 +41,13 @@ jobs:
           ls "$(xcrun --show-sdk-path)/System/Library/Frameworks/Kernel.framework/Headers" | head -10
 
       - name: 📦 Install MacOSKernelSDK
-        env:
-          GIT_ASKPASS: echo
         run: |
-          git clone --depth=1 \
-            https://github.com/acidanthera/MacOSKernelSDK.git \
-            "$GITHUB_WORKSPACE/MacOSKernelSDK"
+          curl -fsSL \
+            https://github.com/acidanthera/MacOSKernelSDK/archive/refs/heads/master.tar.gz \
+            -o /tmp/MacOSKernelSDK.tar.gz
+          mkdir -p "$GITHUB_WORKSPACE/MacOSKernelSDK"
+          tar -xzf /tmp/MacOSKernelSDK.tar.gz \
+            -C "$GITHUB_WORKSPACE/MacOSKernelSDK" --strip-components=1
           echo "KERNEL_SDK_DIR=$GITHUB_WORKSPACE/MacOSKernelSDK" >> $GITHUB_ENV
 
       - name: 🏗 Build kext
