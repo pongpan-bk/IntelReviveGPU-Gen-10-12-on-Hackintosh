@@ -56,7 +56,8 @@
 #endif
 
 #ifndef kIOMapInhibitCache
-#define kIOMapInhibitCache   kIOMapCacheInhibit
+/* Xcode 15.4 removed kIOMapInhibitCache — compute from the existing shift */
+#define kIOMapInhibitCache   (1UL << kIOMapCacheShift)
 #endif
 
 /*
