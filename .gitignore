@@ -1,0 +1,6 @@
+*.o
+*.o.tmp
+*.kext
+*.kext.gz
+.DS_Store
+build/

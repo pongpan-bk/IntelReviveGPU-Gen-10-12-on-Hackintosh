@@ -1,0 +1,86 @@
+# GitHub Actions — Build MyIntelGPU.kext on macOS runner
+#
+# ใช้ macOS 14 (Sonoma) runner ของ GitHub (ฟรี, ใช้ได้สูงสุด 2000 นาที/เดือน)
+# Trigger: git push / PR / manual (workflow_dispatch)
+#
+# ไม่ต้องมี VM เป็นของตัวเอง — GitHub จัด macOS host + Xcode + SDK ให้
+
+name: Build MyIntelGPU.kext
+
+on:
+  push:
+    branches: [ main, master, develop ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+    inputs:
+      log_level:
+        description: 'Build log verbosity'
+        default: 'normal'
+        type: choice
+        options:
+          - quiet
+          - normal
+          - verbose
+
+jobs:
+  build:
+    runs-on: macos-14          # macOS 14 Sonoma, Xcode 15+
+    # หรือใช้ macos-latest (15 Sequoia) ถ้าต้องการ Xcode 16+
+
+    steps:
+      - name: 📥 Checkout repository
+        uses: actions/checkout@v4
+
+      - name: 🔧 Show Xcode version
+        run: |
+          xcodebuild -version
+          xcrun --show-sdk-path
+          echo "Kernel headers:"
+          ls "$(xcrun --show-sdk-path)/System/Library/Frameworks/Kernel.framework/Headers" | head -10
+
+      - name: 📦 Install MacOSKernelSDK (for Xcode 14+)
+        run: |
+          git clone --depth=1 \
+            https://github.com/acidanthera/MacOSKernelSDK.git \
+            /opt/MacOSKernelSDK
+          echo "KERNEL_SDK_OK=1" >> $GITHUB_ENV
+
+      - name: 🏗 Build kext
+        run: |
+          cd MyIntelGPU
+          make
+          echo "KEXT_BUILT=1" >> $GITHUB_ENV
+
+      - name: ✅ Verify kext bundle
+        run: |
+          if [ ! -f "MyIntelGPU/MyIntelGPU.kext/Contents/MacOS/MyIntelGPU" ]; then
+            echo "❌ Build failed — binary not found"
+            exit 1
+          fi
+          file MyIntelGPU/MyIntelGPU.kext/Contents/MacOS/MyIntelGPU
+          echo "✅ Kext binary size: $(stat -f%z MyIntelGPU/MyIntelGPU.kext/Contents/MacOS/MyIntelGPU) bytes"
+
+      - name: 📦 Upload kext artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: MyIntelGPU.kext
+          path: MyIntelGPU/MyIntelGPU.kext/
+          if-no-files-found: error
+          retention-days: 14
+
+  # ─── Optional: run basic validation using kextutil (requires SIP-less env)
+  # validate:
+  #   needs: build
+  #   runs-on: macos-14
+  #   steps:
+  #     - name: 📥 Download built kext
+  #       uses: actions/download-artifact@v4
+  #       with:
+  #         name: MyIntelGPU.kext
+  #         path: MyIntelGPU.kext
+  #     - name: 🔍 Validate kext
+  #       run: |
+  #         sudo chown -R root:wheel MyIntelGPU.kext
+  #         sudo kextutil -nt MyIntelGPU.kext  # -nt = no-kext-load, test only
+  #         echo "✅ Kext validation passed"

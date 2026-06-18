@@ -1,0 +1,94 @@
+# Makefile สำหรับ MyIntelGPU.kext
+#
+#  Build บน macOS เท่านั้น! ต้องการ:
+#    - Xcode Command Line Tools (xcode-select --install)
+#    - MacOSKernelSDK (https://github.com/acidanthera/MacOSKernelSDK)
+#      หรือ Xcode เก่า (< 14) ที่ยังมี Kernel.framework
+#
+#  วิธี build:
+#    make
+#    sudo chown -R root:wheel MyIntelGPU.kext
+#    sudo kextutil -v MyIntelGPU.kext
+#
+#  ดู log:
+#    sudo dmesg | grep MyIntelGPU
+
+TARGET  = MyIntelGPU
+CLASS   = MyIntelGPU
+SDK_DIR = /opt/MacOSKernelSDK
+
+# ─── ค้นหา SDK path ──────────────────────────────────────────────
+SDK_PATH = $(shell xcrun --show-sdk-path 2>/dev/null)
+ifeq ($(SDK_PATH),)
+    $(error ERROR: Xcode SDK not found. Run xcode-select --install)
+endif
+
+# ─── Kernel Headers ──────────────────────────────────────────────
+# ถ้าใช้ Xcode ≥ 14 (macOS Ventura+) Apple ตัด Kernel.framework
+# ต้องใช้ MacOSKernelSDK จาก acidanthera แทน
+KERNEL_HDRS = $(SDK_DIR)
+ifeq ($(wildcard $(SDK_DIR)/Kernel.framework/Headers),)
+    # fallback: ใช้ SDK built-in (Xcode < 14)
+    KERNEL_HDRS = $(SDK_PATH)
+endif
+
+# ─── Compiler Flags ──────────────────────────────────────────────
+# -mkernel          : kernel ABI (no mxcsr, etc.)
+# -arch x86_64      : Intel 64-bit เท่านั้น (ARM64 สำหรับ Apple Silicon)
+# -nostdlib         : ไม่ลิงก์ libc (ใช้ kernel libs แทน)
+# -fno-exceptions   : IOKit ห้ามใช้ C++ exceptions
+# -fno-rtti         : IOKit ห้ามใช้ RTTI (ใช้ OSDynamicCast แทน)
+# -DKERNEL          : 定义 kernel build
+# -D__STRICT_BSD__  : strict POSIX/BSD namespaces
+CXXFLAGS = -std=c++11 \
+           -mkernel \
+           -arch x86_64 \
+           -nostdlib \
+           -fno-builtin \
+           -fno-exceptions \
+           -fno-rtti \
+           -DKERNEL \
+           -D__STRICT_BSD__ \
+           -I$(KERNEL_HDRS) \
+           -I$(SDK_PATH)/System/Library/Frameworks/Kernel.framework/Headers \
+           -I$(SDK_PATH)/usr/include
+
+# ─── Linker Flags ────────────────────────────────────────────────
+# -r              : relocatable object (kext = kernel module)
+# -keep_private_extern : keep private symbols for kext
+LDFLAGS = -r -keep_private_extern
+
+# ─── Sources ─────────────────────────────────────────────────────
+SRC = $(CLASS).cpp
+OBJ = $(CLASS).o
+
+.PHONY: all clean install load unload
+
+all: $(TARGET).kext/Contents/MacOS/$(TARGET)
+
+# ─── Build kext bundle ──────────────────────────────────────────
+$(TARGET).kext/Contents/MacOS/$(TARGET): $(SRC) $(CLASS).hpp Info.plist
+	@mkdir -p $(TARGET).kext/Contents
+	cp Info.plist $(TARGET).kext/Contents/
+	cp Info.plist $(TARGET).kext/Contents/Info.plist
+	$(CC) $(CXXFLAGS) $(LDFLAGS) -o $@ $(SRC)
+	@echo "─── Build complete: $(TARGET).kext ───"
+
+# ─── Utilities ───────────────────────────────────────────────────
+clean:
+	rm -rf $(TARGET).kext $(OBJ)
+
+install: all
+	sudo chown -R root:wheel $(TARGET).kext
+	sudo cp -R $(TARGET).kext /Library/Extensions/
+	sudo kextutil -v /Library/Extensions/$(TARGET).kext
+
+load: all
+	sudo chown -R root:wheel $(TARGET).kext
+	sudo kextutil -v $(TARGET).kext
+
+unload:
+	sudo kextunload -b com.myintelgpu.driver || true
+
+log:
+	sudo dmesg | grep -i "MyIntelGPU" | tail -50
