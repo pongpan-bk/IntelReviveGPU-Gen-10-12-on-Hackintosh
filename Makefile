@@ -74,8 +74,7 @@ all: $(TARGET).kext/Contents/MacOS/$(TARGET)
 
 # ─── Build kext bundle ──────────────────────────────────────────
 $(TARGET).kext/Contents/MacOS/$(TARGET): $(SRC) $(CLASS).hpp Info.plist
-	@mkdir -p $(TARGET).kext/Contents
-	cp Info.plist $(TARGET).kext/Contents/
+	@mkdir -p $(TARGET).kext/Contents/MacOS
 	cp Info.plist $(TARGET).kext/Contents/Info.plist
 	$(CC) $(CXXFLAGS) $(LDFLAGS) -o $@ $(SRC)
 	@echo "─── Build complete: $(TARGET).kext ───"
