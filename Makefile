@@ -15,7 +15,10 @@
 
 TARGET  = MyIntelGPU
 CLASS   = MyIntelGPU
-SDK_DIR = /opt/MacOSKernelSDK
+SDK_DIR ?= /opt/MacOSKernelSDK
+ifneq ($(KERNEL_SDK_DIR),)
+    SDK_DIR := $(KERNEL_SDK_DIR)
+endif
 
 # ─── ค้นหา SDK path ──────────────────────────────────────────────
 SDK_PATH = $(shell xcrun --show-sdk-path 2>/dev/null)

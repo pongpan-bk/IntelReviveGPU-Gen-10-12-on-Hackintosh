@@ -39,33 +39,32 @@ jobs:
           echo "Kernel headers:"
           ls "$(xcrun --show-sdk-path)/System/Library/Frameworks/Kernel.framework/Headers" | head -10
 
-      - name: 📦 Install MacOSKernelSDK (for Xcode 14+)
+      - name: 📦 Install MacOSKernelSDK
         run: |
           git clone --depth=1 \
             https://github.com/acidanthera/MacOSKernelSDK.git \
-            /opt/MacOSKernelSDK
-          echo "KERNEL_SDK_OK=1" >> $GITHUB_ENV
+            "$GITHUB_WORKSPACE/MacOSKernelSDK"
+          echo "KERNEL_SDK_DIR=$GITHUB_WORKSPACE/MacOSKernelSDK" >> $GITHUB_ENV
 
       - name: 🏗 Build kext
         run: |
-          cd MyIntelGPU
-          make
+          make KERNEL_SDK_DIR="$KERNEL_SDK_DIR"
           echo "KEXT_BUILT=1" >> $GITHUB_ENV
 
       - name: ✅ Verify kext bundle
         run: |
-          if [ ! -f "MyIntelGPU/MyIntelGPU.kext/Contents/MacOS/MyIntelGPU" ]; then
+          if [ ! -f "MyIntelGPU.kext/Contents/MacOS/MyIntelGPU" ]; then
             echo "❌ Build failed — binary not found"
             exit 1
           fi
-          file MyIntelGPU/MyIntelGPU.kext/Contents/MacOS/MyIntelGPU
-          echo "✅ Kext binary size: $(stat -f%z MyIntelGPU/MyIntelGPU.kext/Contents/MacOS/MyIntelGPU) bytes"
+          file MyIntelGPU.kext/Contents/MacOS/MyIntelGPU
+          echo "✅ Kext binary size: $(stat -f%z MyIntelGPU.kext/Contents/MacOS/MyIntelGPU) bytes"
 
       - name: 📦 Upload kext artifact
         uses: actions/upload-artifact@v4
         with:
           name: MyIntelGPU.kext
-          path: MyIntelGPU/MyIntelGPU.kext/
+          path: MyIntelGPU.kext/
           if-no-files-found: error
           retention-days: 14
 
