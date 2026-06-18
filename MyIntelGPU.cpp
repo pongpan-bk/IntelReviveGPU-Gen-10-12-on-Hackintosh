@@ -1199,19 +1199,27 @@ bool MyIntelGPU::start(IOService *provider)
             fApertureDesc->retain();
 
             /*
-             * Map BAR2 — ใช้ kIOMapReadWrite | kIOMapAnywhere
+             * Map BAR2 — เลือก cache strategy ตามโหมด FakeID
              *
-             * Write-Combined:
-             *   ถ้าใส่ kIOMapWriteCombined → CPU write buffered,
-             *     performance ดี, แต่ต้อง flush WC buffer เอง
-             *   ถ้าไม่ใส่ → UC (uncacheable) → safe but slow
+             * Write-Combined (WC):
+             *   ถ้า fake → Coffee Lake: ใช้ WC เพื่อ CPU→GPU
+             *   transfer ความเร็วสูง (buffer writes แล้ว flush ทีเดียว)
+             *   แต่ต้อง flush WC buffer ด้วย OSSynchronizeIO()
              *
-             * ที่นี่ใช้ kIOMapInhibitCache (UC) เพื่อ safety ก่อน
-             * ถ้าต้องการ performance อาจเปลี่ยนภายหลัง
+             * Uncacheable (UC/InhibitCache):
+             *   safe default — write ถึง bus ทันที
+             *   แต่ bandwidth ต่ำกว่า WC ประมาณ 10x
              */
+            IOOptionBits apertireFlags = kIOMapAnywhere;
+            if (fFakeGen == 9 && fGraphicsVer != 9) {
+                apertireFlags |= kIOMapWriteCombined;
+            } else {
+                apertireFlags |= kIOMapInhibitCache;
+            }
+
             fApertureMap = fApertureDesc->createMappingInTask(
                                kernel_task,
-                               kIOMapAnywhere | kIOMapInhibitCache,
+                               apertireFlags,
                                0,
                                fApertureDesc->getLength());
 
@@ -1220,15 +1228,13 @@ bool MyIntelGPU::start(IOService *provider)
                                   fApertureMap->getVirtualAddress());
                 fApertureSize = fApertureDesc->getLength();
 
-                IODebug("Phase 3: BAR2 aperture mapped at 0x%p (size=0x%llX)",
-                        fApertureVA, fApertureSize);
+                IODebug("Phase 3: BAR2 aperture mapped at 0x%p (size=0x%llX, %s)",
+                        fApertureVA, fApertureSize,
+                        (apertireFlags & kIOMapWriteCombined) ? "WC" : "UC");
+
+                OSSynchronizeIO();
             } else {
                 IODebug("WARNING: Could not map BAR2 aperture — continuing");
-                /*
-                 * Aperture อาจไม่จำเป็นถ้าเราใช้ API ระดับสูง
-                 * (AppleIGC, AppleGraphicsControl) ในการจัดการ surface
-                 * แต่ถ้าต้องการ low-level access → สำคัญ
-                 */
             }
         } else {
             IODebug("BAR2 descriptor not available — no aperture?");
