@@ -27,12 +27,15 @@ ifeq ($(SDK_PATH),)
 endif
 
 # ─── Kernel Headers ──────────────────────────────────────────────
-# ถ้าใช้ Xcode ≥ 14 (macOS Ventura+) Apple ตัด Kernel.framework
-# ต้องใช้ MacOSKernelSDK จาก acidanthera แทน
+# MacKernelSDK (acidanthera) structure: Headers/ directly
+# ถ้าไม่พบ → fallback ใช้ SDK built-in (Xcode 14-15)
 KERNEL_HDRS = $(SDK_DIR)
-ifeq ($(wildcard $(SDK_DIR)/Kernel.framework/Headers),)
-    # fallback: ใช้ SDK built-in (Xcode < 14)
-    KERNEL_HDRS = $(SDK_PATH)
+ifneq ($(wildcard $(SDK_DIR)/Headers),)
+    KERNEL_HDRS := $(SDK_DIR)
+else ifneq ($(wildcard $(SDK_DIR)/Kernel.framework/Headers),)
+    KERNEL_HDRS := $(SDK_DIR)
+else
+    KERNEL_HDRS := $(SDK_PATH)
 endif
 
 # ─── Compiler Flags ──────────────────────────────────────────────

@@ -27,9 +27,14 @@
 
 #include "MyIntelGPU.hpp"
 #include <libkern/libkern.h>
+#include <libkern/OSAtomic.h>
 #include <IOKit/IOLib.h>
 #include <IOKit/IODeviceMemory.h>
 #include <stdint.h>
+
+#ifndef kIOPCIMemorySpace64Bit
+#define kIOPCIMemorySpace64Bit 0x1000000000000000ULL
+#endif
 
 /*
  * Macro สำหรับลงทะเบียนคลาสกับ IOKit runtime
@@ -1146,7 +1151,9 @@ bool MyIntelGPU::start(IOService *provider)
      */
     fMMIOMap = fMMIODesc->createMappingInTask(
                     kernel_task,
-                    kIOMapAnywhere | kIOMapInhibitCache);
+                    kIOMapAnywhere | kIOMapInhibitCache,
+                    0,
+                    fMMIODesc->getLength());
 
     if (!fMMIOMap) {
         IODebug("ERROR: Cannot map BAR0 MMIO");
@@ -1204,7 +1211,9 @@ bool MyIntelGPU::start(IOService *provider)
              */
             fApertureMap = fApertureDesc->createMappingInTask(
                                kernel_task,
-                               kIOMapAnywhere | kIOMapInhibitCache);
+                               kIOMapAnywhere | kIOMapInhibitCache,
+                               0,
+                               fApertureDesc->getLength());
 
             if (fApertureMap) {
                 fApertureVA = reinterpret_cast<volatile uint8_t *>(

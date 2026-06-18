@@ -1,89 +1,47 @@
-# GitHub Actions — Build MyIntelGPU.kext on macOS runner
-#
-# ใช้ macOS 14 (Sonoma) runner ของ GitHub (ฟรี, ใช้ได้สูงสุด 2000 นาที/เดือน)
-# Trigger: git push / PR / manual (workflow_dispatch)
-#
-# ไม่ต้องมี VM เป็นของตัวเอง — GitHub จัด macOS host + Xcode + SDK ให้
-
 name: Build MyIntelGPU.kext
 
 on:
   push:
-    branches: [ main, master, develop ]
+    branches: [ main, master ]
   pull_request:
     branches: [ main, master ]
   workflow_dispatch:
-    inputs:
-      log_level:
-        description: 'Build log verbosity'
-        default: 'normal'
-        type: choice
-        options:
-          - quiet
-          - normal
-          - verbose
 
 jobs:
   build:
+    name: Build Kernel Extension
     runs-on: macos-14
-    env:
-      ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: true
 
     steps:
-      - name: 📥 Checkout repository
-        uses: actions/checkout@v4
+    - name: Checkout Code
+      uses: actions/checkout@v4
 
-      - name: 🔧 Show Xcode version
-        run: |
-          xcodebuild -version
-          xcrun --show-sdk-path
-          echo "Kernel headers:"
-          ls "$(xcrun --show-sdk-path)/System/Library/Frameworks/Kernel.framework/Headers" | head -10
+    - name: Download and Setup MacKernelSDK
+      run: |
+        curl -fSL https://github.com/acidanthera/MacKernelSDK/archive/refs/heads/master.tar.gz \
+          -o /tmp/MacKernelSDK.tar.gz
+        mkdir -p "${{ github.workspace }}/MacKernelSDK"
+        tar -xzf /tmp/MacKernelSDK.tar.gz \
+          -C "${{ github.workspace }}/MacKernelSDK" --strip-components=1
+        echo "KERNEL_SDK_DIR=${{ github.workspace }}/MacKernelSDK" >> $GITHUB_ENV
 
-      - name: 📦 Install MacOSKernelSDK
-        run: |
-          curl -fsSL \
-            https://github.com/acidanthera/MacKernelSDK/archive/refs/heads/master.tar.gz \
-            -o /tmp/MacKernelSDK.tar.gz
-          mkdir -p "$GITHUB_WORKSPACE/MacKernelSDK"
-          tar -xzf /tmp/MacKernelSDK.tar.gz \
-            -C "$GITHUB_WORKSPACE/MacKernelSDK" --strip-components=1
-          echo "KERNEL_SDK_DIR=$GITHUB_WORKSPACE/MacKernelSDK" >> $GITHUB_ENV
+    - name: Compile Kext via Makefile
+      run: |
+        make KERNEL_SDK_DIR="${{ github.workspace }}/MacKernelSDK"
 
-      - name: 🏗 Build kext
-        run: |
-          make KERNEL_SDK_DIR="$KERNEL_SDK_DIR"
-          echo "KEXT_BUILT=1" >> $GITHUB_ENV
+    - name: Verify Kext Binary Output
+      run: |
+        if [ ! -f "MyIntelGPU.kext/Contents/MacOS/MyIntelGPU" ]; then
+          echo "❌ Build failed — binary not found"
+          exit 1
+        fi
+        echo "✅ Build success!"
+        ls -la MyIntelGPU.kext/Contents/MacOS/MyIntelGPU
 
-      - name: ✅ Verify kext bundle
-        run: |
-          if [ ! -f "MyIntelGPU.kext/Contents/MacOS/MyIntelGPU" ]; then
-            echo "❌ Build failed — binary not found"
-            exit 1
-          fi
-          file MyIntelGPU.kext/Contents/MacOS/MyIntelGPU
-          echo "✅ Kext binary size: $(stat -f%z MyIntelGPU.kext/Contents/MacOS/MyIntelGPU) bytes"
-
-      - name: 📦 Upload kext artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: MyIntelGPU.kext
-          path: MyIntelGPU.kext/
-          if-no-files-found: error
-          retention-days: 14
-
-  # ─── Optional: run basic validation using kextutil (requires SIP-less env)
-  # validate:
-  #   needs: build
-  #   runs-on: macos-14
-  #   steps:
-  #     - name: 📥 Download built kext
-  #       uses: actions/download-artifact@v4
-  #       with:
-  #         name: MyIntelGPU.kext
-  #         path: MyIntelGPU.kext
-  #     - name: 🔍 Validate kext
-  #       run: |
-  #         sudo chown -R root:wheel MyIntelGPU.kext
-  #         sudo kextutil -nt MyIntelGPU.kext  # -nt = no-kext-load, test only
-  #         echo "✅ Kext validation passed"
+    - name: Upload Kext to GitHub Artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: MyIntelGPU.kext
+        path: MyIntelGPU.kext/
+        if-no-files-found: error
+        retention-days: 7
