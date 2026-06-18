@@ -59,7 +59,7 @@ CXXFLAGS = -std=c++11 \
 # ─── Linker Flags ────────────────────────────────────────────────
 # -r              : relocatable object (kext = kernel module)
 # -keep_private_extern : keep private symbols for kext
-LDFLAGS = -r -keep_private_extern
+LDFLAGS = -r -keep_private_externs
 
 # ─── Sources ─────────────────────────────────────────────────────
 SRC = $(CLASS).cpp
