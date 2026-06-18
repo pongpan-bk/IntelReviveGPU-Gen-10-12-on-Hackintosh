@@ -43,12 +43,12 @@ jobs:
       - name: 📦 Install MacOSKernelSDK
         run: |
           curl -fsSL \
-            https://github.com/acidanthera/MacOSKernelSDK/archive/refs/heads/master.tar.gz \
-            -o /tmp/MacOSKernelSDK.tar.gz
-          mkdir -p "$GITHUB_WORKSPACE/MacOSKernelSDK"
-          tar -xzf /tmp/MacOSKernelSDK.tar.gz \
-            -C "$GITHUB_WORKSPACE/MacOSKernelSDK" --strip-components=1
-          echo "KERNEL_SDK_DIR=$GITHUB_WORKSPACE/MacOSKernelSDK" >> $GITHUB_ENV
+            https://github.com/acidanthera/MacKernelSDK/archive/refs/heads/master.tar.gz \
+            -o /tmp/MacKernelSDK.tar.gz
+          mkdir -p "$GITHUB_WORKSPACE/MacKernelSDK"
+          tar -xzf /tmp/MacKernelSDK.tar.gz \
+            -C "$GITHUB_WORKSPACE/MacKernelSDK" --strip-components=1
+          echo "KERNEL_SDK_DIR=$GITHUB_WORKSPACE/MacKernelSDK" >> $GITHUB_ENV
 
       - name: 🏗 Build kext
         run: |

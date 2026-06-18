@@ -15,7 +15,7 @@
 
 TARGET  = MyIntelGPU
 CLASS   = MyIntelGPU
-SDK_DIR ?= /opt/MacOSKernelSDK
+SDK_DIR ?= /opt/MacKernelSDK
 ifneq ($(KERNEL_SDK_DIR),)
     SDK_DIR := $(KERNEL_SDK_DIR)
 endif
