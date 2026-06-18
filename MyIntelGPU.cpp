@@ -1254,10 +1254,16 @@ bool MyIntelGPU::start(IOService *provider)
                         fApertureVA, fApertureSize,
                         (apertireFlags & kIOMapWriteCombined) ? "WC" : "UC");
 
-                OSSynchronizeIO();
+                // สั่งล้างแคชซีพียูระดับฮาร์ดแวร์ด้วย wbinvd (Write-Back and Invalidate Cache)
+#if defined(__x86_64__)
+                __asm__ volatile("wbinvd" : : : "memory");
+#elif defined(__arm64__)
+                __asm__ volatile("isb; dsb sy" : : : "memory");
+#endif
             } else {
                 IODebug("WARNING: Could not map BAR2 aperture — continuing");
             }
+
         } else {
             IODebug("BAR2 descriptor not available — no aperture?");
         }
