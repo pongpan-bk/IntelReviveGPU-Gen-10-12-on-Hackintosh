@@ -1,0 +1,47 @@
+cp Info.plist MyIntelGPU.kext/Contents/Info.plist
+cc -std=c++11 -mkernel -arch x86_64 -nostdlib -fno-builtin -fno-exceptions -fno-rtti -DKERNEL -D__STRICT_BSD__ -I/Users/runner/work/MyIntelGPU/MyIntelGPU/MacKernelSDK/Headers -r -keep_private_externs -o MyIntelGPU.kext/Contents/MacOS/MyIntelGPU MyIntelGPU.cpp
+MyIntelGPU.cpp:169:9: error: cannot jump from this goto statement to its label
+        goto fail_bar0;
+        ^
+MyIntelGPU.cpp:208:14: note: jump bypasses variable initialization
+    uint32_t gmdId = readReg32(GMD_ID_GRAPHICS);
+             ^
+MyIntelGPU.cpp:163:9: error: cannot jump from this goto statement to its label
+        goto fail_pci;
+        ^
+MyIntelGPU.cpp:208:14: note: jump bypasses variable initialization
+    uint32_t gmdId = readReg32(GMD_ID_GRAPHICS);
+             ^
+MyIntelGPU.cpp:153:9: error: cannot jump from this goto statement to its label
+        goto fail_pci;
+        ^
+MyIntelGPU.cpp:208:14: note: jump bypasses variable initialization
+    uint32_t gmdId = readReg32(GMD_ID_GRAPHICS);
+             ^
+MyIntelGPU.cpp:146:9: error: cannot jump from this goto statement to its label
+        goto fail_pci;
+        ^
+MyIntelGPU.cpp:208:14: note: jump bypasses variable initialization
+    uint32_t gmdId = readReg32(GMD_ID_GRAPHICS);
+             ^
+MyIntelGPU.cpp:142:9: error: cannot jump from this goto statement to its label
+        goto fail_pci;
+        ^
+MyIntelGPU.cpp:208:14: note: jump bypasses variable initialization
+    uint32_t gmdId = readReg32(GMD_ID_GRAPHICS);
+             ^
+MyIntelGPU.cpp:135:9: error: cannot jump from this goto statement to its label
+        goto fail_super;
+        ^
+MyIntelGPU.cpp:208:14: note: jump bypasses variable initialization
+    uint32_t gmdId = readReg32(GMD_ID_GRAPHICS);
+             ^
+MyIntelGPU.cpp:655:37: error: no member named 'getPhysicalSegment64' in 'IOMemoryDescriptor'; did you mean 'getPhysicalSegment'?
+    uint64_t ringPhysAddr = ringMD->getPhysicalSegment64(0, &segLen);
+                                    ^~~~~~~~~~~~~~~~~~~~
+                                    getPhysicalSegment
+/Users/runner/work/MyIntelGPU/MyIntelGPU/MacKernelSDK/Headers/IOKit/IOMemoryDescriptor.h:316:19: note: 'getPhysicalSegment' declared here
+        virtual addr64_t getPhysicalSegment( IOByteCount   offset,
+                         ^
+7 errors generated.
+make: *** [MyIntelGPU.kext/Contents/MacOS/MyIntelGPU] Error 1
