@@ -27,21 +27,31 @@ jobs:
 
     - name: Compile Kext via Makefile
       run: |
-        make KERNEL_SDK_DIR="${{ github.workspace }}/MacKernelSDK"
+        make KERNEL_SDK_DIR="${{ github.workspace }}/MacKernelSDK" 2>&1 | tee /tmp/build.log
 
     - name: Verify Kext Binary Output
       run: |
         if [ ! -f "MyIntelGPU.kext/Contents/MacOS/MyIntelGPU" ]; then
           echo "❌ Build failed — binary not found"
+          cat /tmp/build.log
           exit 1
         fi
         echo "✅ Build success!"
         ls -la MyIntelGPU.kext/Contents/MacOS/MyIntelGPU
 
     - name: Upload Kext to GitHub Artifacts
+      if: success()
       uses: actions/upload-artifact@v4
       with:
         name: MyIntelGPU.kext
         path: MyIntelGPU.kext/
         if-no-files-found: error
+        retention-days: 7
+
+    - name: Upload Build Log
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: build-log
+        path: /tmp/build.log
         retention-days: 7
