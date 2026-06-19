@@ -641,8 +641,19 @@ bool MyIntelGPU::initEngineRing(void)
     fRingTail = 0;
     fRingHead = 0;
 
-    // physical address for the ring base register
-    addr64_t ringPhysAddr = kvtophys((vm_offset_t)fRingBuffer);
+    // Get physical address of ring buffer via IOMemoryDescriptor
+    // (kvtophys/addr64_t are XNU internals not in MacKernelSDK)
+    IOMemoryDescriptor *ringMD = IOMemoryDescriptor::withAddress(
+        (void *)fRingBuffer, RING_SIZE_BYTES, kIODirectionNone);
+    if (!ringMD) {
+        IOLog("MyIntelGPU::[RING] withAddress failed\n");
+        IOFree((void *)fRingBuffer, RING_SIZE_BYTES);
+        fRingBuffer = nullptr;
+        return false;
+    }
+    IOByteCount segLen;
+    uint64_t ringPhysAddr = ringMD->getPhysicalSegment64(0, &segLen);
+    ringMD->release();
 
     writeReg32(RING_START_REG, (uint32_t)ringPhysAddr);
     writeReg32(RING_HEAD_REG,  0);
@@ -654,7 +665,7 @@ bool MyIntelGPU::initEngineRing(void)
     writeReg32(RING_CTRL_REG, ringCtrl);
 
     IOLog("MyIntelGPU::[RING] Engine ring enabled phys=0x%llx\n",
-          (uint64_t)ringPhysAddr);
+          ringPhysAddr);
     return true;
 }
 
