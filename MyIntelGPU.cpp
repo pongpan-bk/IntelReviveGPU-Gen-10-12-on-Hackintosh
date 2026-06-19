@@ -123,6 +123,8 @@ IOService * MyIntelGPU::probe(IOService *provider, SInt32 *score)
 // ─────────────────────────────────────────────
 bool MyIntelGPU::start(IOService *provider)
 {
+    uint32_t gmdId = 0;
+
     if (!super::start(provider)) {
         IOLog("MyIntelGPU::start: super::start failed\n");
         return false;
@@ -205,7 +207,7 @@ bool MyIntelGPU::start(IOService *provider)
     fRevision = fPCIDevice->configRead8(kIOPCIConfigRevisionID);
 
     // Read GMD_ID to confirm MMIO is live
-    uint32_t gmdId = readReg32(GMD_ID_GRAPHICS);
+    gmdId = readReg32(GMD_ID_GRAPHICS);
     if (gmdId == 0xFFFFFFFF || gmdId == 0) {
         IOLog("MyIntelGPU::start: WARNING — GMD_ID=0x%08x (device may be asleep)\n", gmdId);
     } else {
@@ -652,7 +654,7 @@ bool MyIntelGPU::initEngineRing(void)
         return false;
     }
     IOByteCount segLen;
-    uint64_t ringPhysAddr = ringMD->getPhysicalSegment64(0, &segLen);
+    uint64_t ringPhysAddr = ringMD->getPhysicalSegment(0, &segLen);
     ringMD->release();
 
     writeReg32(RING_START_REG, (uint32_t)ringPhysAddr);
