@@ -7,6 +7,10 @@ on:
     branches: [ main, master ]
   workflow_dispatch:
 
+permissions:
+  contents: write
+  issues: write
+
 jobs:
   build:
     name: Build Kernel Extension
@@ -56,19 +60,15 @@ jobs:
         path: /tmp/build.log
         retention-days: 7
 
-    - name: Publish Build Error as Issue
+    - name: Publish Build Log to Repo
       if: failure()
-      env:
-        GH_TOKEN: ${{ github.token }}
       run: |
-        LOG=$(cat /tmp/build.log)
-        gh issue create \
-          --title "CI Build Failure #${{ github.run_number }}" \
-          --body "Build failed on commit ${{ github.sha }}
-        \`\`\`
-        $LOG
-        \`\`\`
-        " \
-          --label "build-failure" 2>&1 || echo "gh issue create failed, trying alternate method"
+        mkdir -p .ci-logs
+        cp /tmp/build.log ".ci-logs/build-error-${{ github.run_number }}.log"
+        git config user.name "CI Build Bot"
+        git config user.email "ci-bot@users.noreply.github.com"
+        git add .ci-logs/
+        git commit -m "ci: save build error log for run #${{ github.run_number }}" --allow-empty
+        git push origin HEAD:ci-logs --force 2>&1 || echo "git push failed"
 
 
