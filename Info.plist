@@ -15,10 +15,12 @@
     <string>MyIntelGPU</string>
     <key>CFBundlePackageType</key>
     <string>KEXT</string>
-    <key>CFBundleShortVersionString</key>
-    <string>1.0.0</string>
-    <key>CFBundleVersion</key>
-    <string>1.0.0</string>
+	<key>CFBundleShortVersionString</key>
+	<string>1.0.0</string>
+	<key>CFBundleVersion</key>
+	<string>1.0.0</string>
+	<key>CFBundleGetInfoString</key>
+	<string>MyIntelGPU RPL Native iGPU driver</string>
     <key>IOKitPersonalities</key>
     <dict>
         <key>MyIntelGPU_FakeID</key>
