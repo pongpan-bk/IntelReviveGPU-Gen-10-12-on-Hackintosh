@@ -30,7 +30,7 @@
             <key>IOProviderClass</key>
             <string>IOPCIDevice</string>
             <key>IOMatch</key>
-            <string>0x46A68086 0xA7AC8086</string>
+            <string>0xA7808086 0xA78A8086 0xA7AC8086 0xA7A08086 0xA7A18086 0xA7A88086 0xA7A98086 0xA7AA8086</string>
         </dict>
     </dict>
     <key>OSBundleLibraries</key>
