@@ -6,6 +6,19 @@ on:
   pull_request:
     branches: [ main, master ]
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Release tag (leave empty for auto)'
+        required: false
+        type: string
+
+permissions:
+  contents: write
+  actions: write
+
+env:
+  KEXT_NAME: MyIntelGPU
+  BUNDLE_ID: com.myintelgpu.driver
 
 jobs:
   build:
@@ -15,6 +28,8 @@ jobs:
     steps:
     - name: Checkout Code
       uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
 
     - name: Download and Setup MacKernelSDK
       run: |
@@ -27,21 +42,86 @@ jobs:
 
     - name: Compile Kext via Makefile
       run: |
-        make KERNEL_SDK_DIR="${{ github.workspace }}/MacKernelSDK"
+        make KERNEL_SDK_DIR="${{ github.workspace }}/MacKernelSDK" 2>&1 | tee /tmp/build.log
 
     - name: Verify Kext Binary Output
       run: |
-        if [ ! -f "MyIntelGPU.kext/Contents/MacOS/MyIntelGPU" ]; then
+        if [ ! -f "${KEXT_NAME}.kext/Contents/MacOS/${KEXT_NAME}" ]; then
           echo "❌ Build failed — binary not found"
+          cat /tmp/build.log
           exit 1
         fi
         echo "✅ Build success!"
-        ls -la MyIntelGPU.kext/Contents/MacOS/MyIntelGPU
+        file "${KEXT_NAME}.kext/Contents/MacOS/${KEXT_NAME}"
+        ls -la "${KEXT_NAME}.kext/Contents/MacOS/${KEXT_NAME}"
 
     - name: Upload Kext to GitHub Artifacts
       uses: actions/upload-artifact@v4
       with:
-        name: MyIntelGPU.kext
-        path: MyIntelGPU.kext/
+        name: ${KEXT_NAME}.kext
+        path: ${KEXT_NAME}.kext/
         if-no-files-found: error
         retention-days: 7
+
+    - name: Determine Version
+      id: version
+      run: |
+        SHORT_HASH=$(git rev-parse --short HEAD)
+        DATE_TAG=$(date -u +%Y%m%d)
+        if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "${{ github.event.inputs.release_tag }}" ]; then
+          echo "tag=${{ github.event.inputs.release_tag }}" >> $GITHUB_OUTPUT
+        else
+          echo "tag=v1.0.0-${DATE_TAG}-${SHORT_HASH}" >> $GITHUB_OUTPUT
+        fi
+
+    - name: Create ZIP Archive
+      run: |
+        ditto -c -k --sequesterRsrc --keepParent "${KEXT_NAME}.kext" "/tmp/${KEXT_NAME}.kext.zip"
+
+    - name: Create Release
+      if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+      uses: softprops/action-gh-release@v2
+      with:
+        tag_name: ${{ steps.version.outputs.tag }}
+        name: "${{ env.KEXT_NAME }} ${{ steps.version.outputs.tag }}"
+        body: |
+          ## ${{ env.KEXT_NAME }}.kext — Automated Build
+
+          **Commit:** ${{ github.sha }}
+          **Branch:** ${{ github.ref_name }}
+          **Build Date:** $(date -u)
+
+          ###  Included
+          - `${{ env.KEXT_NAME }}.kext` — kernel extension binary
+
+          ### Installation
+          1. Extract `${{ env.KEXT_NAME }}.kext.zip`
+          2. Copy to EFI/OC/Kexts/ or /Library/Extensions/
+          3. In terminal:
+             ```bash
+             sudo chown -R root:wheel ${{ env.KEXT_NAME }}.kext
+             sudo kextutil -v ${{ env.KEXT_NAME }}.kext
+             ```
+
+          ### Hardware Support
+          - Intel Alder Lake-P (0x46A0, 0x46A1, 0x46A6, 0x46B0, 0x46B1)
+          - Intel Raptor Lake-P/U (0xA7A0, 0xA7A1, 0xA7A8, 0xA7A9, 0xA7AA, 0xA7AC)
+
+          ### Notes
+          - Requires macOS 11+ (Big Sur or later)
+          - FakeID: Alder Lake/Raptor Lake → Coffee Lake
+          - Display: DPLL + eDP panel + backlight init
+          - Tested on Core 5 120U (RPL-U)
+        files: |
+          /tmp/${{ env.KEXT_NAME }}.kext.zip
+        fail_on_unmatched_files: false
+        generate_release_notes: false
+        make_latest: true
+
+    - name: Upload Build Log on Failure
+      if: failure()
+      uses: actions/upload-artifact@v4
+      with:
+        name: build-log
+        path: /tmp/build.log
+        retention-days: 30
