@@ -4,3 +4,5 @@
 *.kext.gz
 .DS_Store
 build/
+
+*.iso
