@@ -95,6 +95,87 @@
 #define CURSOR_D_REAL       0x73080
 
 /*
+ * ─────────────────────────────────────────────
+ *  Display Register Bases — CFL (Gen9) vs RPL (Gen12.2)
+ * ─────────────────────────────────────────────
+ *  Pipe/Plane registers:
+ *    Pipe A: 0x70000 (same on both)
+ *    Pipe B: 0x71000 (same)
+ *    Pipe C: 0x72000 (same)
+ *
+ *  Transcoder registers:
+ *    TRANS_A: 0x60000 (same)
+ *    TRANS_B: 0x61000 (same)
+ *    TRANS_C: 0x62000 (same)
+ *
+ *  DDI Buffer registers:
+ *    DDI A: 0x64000 (same)
+ *    DDI B: 0x64100 (same)
+ *
+ *  PCH (South Display) — ต่างกัน!
+ *    CFL:  PCH registers at 0xCxxx  (I/O space)
+ *    RPL:  PCH registers at 0xCxxxx (MMIO space, different base)
+ *
+ *  Reference: intel_display_regs.h, i915_reg.h
+ * ─────────────────────────────────────────────
+ */
+#define TRANSCODER_A_BASE    0x60000
+#define TRANSCODER_B_BASE    0x61000
+#define TRANSCODER_C_BASE    0x62000
+
+#define PIPE_A_BASE          0x70000
+#define PIPE_B_BASE          0x71000
+#define PIPE_C_BASE          0x72000
+
+/* Plane registers (per pipe) */
+#define PLANE_A_BASE         0x70100   /* Pipe A primary plane */
+#define PLANE_B_BASE         0x71100   /* Pipe B primary plane */
+#define PLANE_C_BASE         0x72100   /* Pipe C primary plane */
+
+/* DDI (Digital Display Interface) */
+#define DDI_A_BASE           0x64000
+#define DDI_B_BASE           0x64100
+#define DDI_C_BASE           0x64200
+
+/* eDP Panel Power Sequencing — same on both */
+#define PP_CONTROL           0xC50
+#define PP_ON_DELAYS         0xC54
+#define PP_OFF_DELAYS        0xC58
+#define PP_DIVISOR           0xC60
+#define PP_STATUS            0xC64
+
+/* Backlight — ต่างกัน!
+ *  CFL:  0x48250 (PCH backlight)
+ *  RPL:  0xC8250 (different offset in display MMIO)
+ */
+#define CFL_BLC_PWM_CTL      0x48250   /* Coffee Lake backlight */
+#define RPL_BLC_PWM_CTL      0xC8250   /* Raptor Lake backlight */
+
+/*
+ *  CDCLK Control — ต่างกัน
+ *  CFL:  CDCLK_CTL = 0x130000
+ *  RPL:  CDCLK_CTL = 0x130000 (same base, but bit layout differs)
+ */
+#define CDCLK_CTL            0x130000
+#define CDCLK_FREQ_SEL_MASK  0x00000180
+
+/* DPLL — completely different architecture */
+/* CFL: DPLL_CRTL1, LCPLL1_CTL */
+/* RPL: uses TGL+ DPLL registers */
+#define DPLL0_CFGCR0         0x164000   /* RPL/ADL DPLL0 config */
+#define DPLL0_CFGCR1         0x164004
+#define DPLL0_ENABLE         0x164100
+
+/*
+ * PCH (South Display) translation
+ *  CFL PCH display registersอยู่ที่ 0x48000-0x48FFF
+ *  RPL PCH display registersอยู่ที่ 0xC8000-0xC8FFF
+ */
+#define PCH_DISPLAY_BASE_FAKE  0x48000
+#define PCH_DISPLAY_BASE_REAL  0xC8000
+#define PCH_DISPLAY_WINDOW     0x1000
+
+/*
  * Register Offsets อื่น ๆ ที่สำคัญ
  */
 #define GMD_ID_GRAPHICS     0xD8C      /* Graphics Media Device ID register
@@ -307,6 +388,19 @@ public:
 
     /*
      * ─────────────────────────────────────
+     *  Display / Panel Initialization
+     * ─────────────────────────────────────
+     */
+
+    virtual bool initDisplay(void);
+    virtual bool panelPowerOn(void);
+    virtual bool initCDCLK(void);
+    virtual bool initDPLL(void);
+    virtual bool initBacklight(void);
+    virtual void dumpDisplayStatus(void);
+
+    /*
+     * ─────────────────────────────────────
      *  FakeID Helpers
      * ─────────────────────────────────────
      */
@@ -394,7 +488,7 @@ private:
     volatile uint32_t       *fGsm;             /*!< GTT Stolen Memory (page table array) */
 
     /* Translation Table */
-    RegisterTranslationEntry fTransTable[8];   /*!< ตารางแปลพิกัด register offset */
+    RegisterTranslationEntry fTransTable[10];   /*!< ตารางแปลพิกัด register offset */
     int                      fTransCount;      /*!< จำนวน entry ในตาราง */
 
     /* Memory Map References — เก็บไว้เพื่อ release ใน stop() */

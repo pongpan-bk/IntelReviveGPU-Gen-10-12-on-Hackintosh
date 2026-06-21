@@ -511,7 +511,28 @@ void MyIntelGPU::buildTranslationTable(void)
     fTransCount++;
 
     /*
-     * Entry 5: Cursor Pipe D — ที่ Alder Lake มี แต่ Coffee Lake ไม่มี
+     * Entry 5: PCH (South Display) — ต่างกัน
+     *
+     * Coffee Lake: PCH display registers at 0x48000-0x48FFF
+     * Raptor Lake: PCH display registers at 0xC8000-0xC8FFF
+     *
+     * ส่งผลต่อ:
+     *   - Panel Power Sequencing (PP_CONTROL etc. ที่อยู่ PCH)
+     *   - Backlight PWM (BLC_PWM_CTL = 0x48250 → 0xC8250)
+     *   - PCH GPIO, PCH misc
+     *
+     * ถ้า macOS เขียน PP_CONTROL ที่ 0xC50 (global) → ตรงกัน
+     * แต่ถ้า macOS เขียนผ่าน PCH base 0x48000 → ต้องแปลง
+     */
+    fTransTable[fTransCount].name       = "PCH Display";
+    fTransTable[fTransCount].fakeBase   = PCH_DISPLAY_BASE_FAKE;   /* 0x48000 */
+    fTransTable[fTransCount].realBase   = PCH_DISPLAY_BASE_REAL;   /* 0xC8000 */
+    fTransTable[fTransCount].windowSize = PCH_DISPLAY_WINDOW;      /* 0x1000 */
+    fTransTable[fTransCount].enabled    = true;
+    fTransCount++;
+
+    /*
+     * Entry 6: Cursor Pipe D — ที่ Alder Lake มี แต่ Coffee Lake ไม่มี
      *
      * ถ้า macOS พยายามเขียน 0x73080 (pipe D cursor offset)
      * เราไม่ต้องแปล เพราะ pipe D ไม่มีใน Coffee Lake
@@ -1024,6 +1045,93 @@ void MyIntelGPU::clflushRange(const void *addr, size_t size)
 }
 
 #pragma mark -
+#pragma mark - Display / Panel Methods
+
+bool MyIntelGPU::initCDCLK(void)
+{
+    if (!fRegs) return false;
+    uint32_t cdclk = readReg32(CDCLK_CTL);
+    IODebug("CDCLK_CTL = 0x%08X", cdclk);
+    if (cdclk == 0 || cdclk == 0xFFFFFFFF) {
+        IODebug("CDCLK not accessible");
+        return false;
+    }
+    IODebug("CDCLK: frequency valid");
+    return true;
+}
+
+bool MyIntelGPU::initDPLL(void)
+{
+    if (!fRegs) return false;
+    uint32_t dpllEn = readReg32(DPLL0_ENABLE);
+    IODebug("DPLL0_ENABLE = 0x%08X", dpllEn);
+    dpllEn |= 0x80000000;
+    writeReg32(DPLL0_ENABLE, dpllEn);
+    IODebug("DPLL0 enabled");
+    return true;
+}
+
+bool MyIntelGPU::panelPowerOn(void)
+{
+    if (!fRegs) return false;
+    uint32_t ppStat = readReg32(PP_STATUS);
+    IODebug("PP_STATUS = 0x%08X", ppStat);
+    uint32_t ppCtl = readReg32(PP_CONTROL);
+    IODebug("PP_CONTROL = 0x%08X", ppCtl);
+    ppCtl |= 0x80000000;
+    writeReg32(PP_CONTROL, ppCtl);
+    IODebug("Panel power on requested");
+    return true;
+}
+
+bool MyIntelGPU::initBacklight(void)
+{
+    if (!fRegs) return false;
+    uint32_t fakeOffset = CFL_BLC_PWM_CTL;
+    uint32_t realOffset = translateAddress(fakeOffset);
+    if (fakeOffset != realOffset) {
+        IODebug("Backlight translated 0x%04X → 0x%04X", fakeOffset, realOffset);
+    }
+    uint32_t pwm = readReg32(fakeOffset);
+    IODebug("BLC_PWM_CTL = 0x%08X", pwm);
+    pwm |= 0x80000000;
+    writeReg32(fakeOffset, pwm);
+    IODebug("Backlight PWM enabled");
+    return true;
+}
+
+void MyIntelGPU::dumpDisplayStatus(void)
+{
+    if (!fRegs) return;
+    IODebug("=== Display Status Dump ===");
+    IODebug("  PP_STATUS  = 0x%08X", readReg32(PP_STATUS));
+    IODebug("  PP_CONTROL = 0x%08X", readReg32(PP_CONTROL));
+    IODebug("  CDCLK_CTL  = 0x%08X", readReg32(CDCLK_CTL));
+    IODebug("  DPLL0_EN   = 0x%08X", readReg32(DPLL0_ENABLE));
+    IODebug("  TRANS_CONF_A = 0x%08X", readReg32(TRANSCODER_A_BASE + 0x1C));
+    IODebug("  PIPE_CONF_A  = 0x%08X", readReg32(PIPE_A_BASE + 0x244));
+    IODebug("  CFL PWM     = 0x%08X", readReg32(CFL_BLC_PWM_CTL));
+    uint32_t fakeDw = readReg32(PCH_DISPLAY_BASE_FAKE);
+    uint32_t realDw = readReg32(PCH_DISPLAY_BASE_REAL);
+    IODebug("  PCH fake 0x%04X = 0x%08X", PCH_DISPLAY_BASE_FAKE, fakeDw);
+    IODebug("  PCH real 0x%04X = 0x%08X", PCH_DISPLAY_BASE_REAL, realDw);
+    IODebug("===========================");
+}
+
+bool MyIntelGPU::initDisplay(void)
+{
+    IODebug("=== Display Init Start ===");
+    bool ok = true;
+    if (!initCDCLK())    { IODebug("CDCLK init FAILED");    ok = false; }
+    if (!initDPLL())     { IODebug("DPLL init FAILED");     ok = false; }
+    if (!panelPowerOn()) { IODebug("Panel power FAILED");   ok = false; }
+    if (!initBacklight()){ IODebug("Backlight init FAILED");ok = false; }
+    dumpDisplayStatus();
+    IODebug("=== Display Init %s ===", ok ? "OK" : "PARTIAL");
+    return ok;
+}
+
+#pragma mark -
 #pragma mark - start
 
 /*
@@ -1304,6 +1412,25 @@ bool MyIntelGPU::start(IOService *provider)
     buildTranslationTable();
 
     IODebug("Phase 5: Translation table ready (%d entries)", fTransCount);
+
+    /*
+     * ============================================================
+     *  Phase 5b: Display / Panel Init
+     * ============================================================
+     *
+     *  Initialize display pipeline สำหรับ eDP:
+     *    - CDCLK
+     *    - DPLL0
+     *    - Panel power sequencing
+     *    - Backlight PWM
+     *
+     *  ไม่ fail start() ถ้า display ไม่ทำงาน (kext ยัง load ได้)
+     */
+    if (fFakeGen != 0) {
+        initDisplay();
+    } else {
+        IODebug("Phase 5b: Skipping display init (unknown hardware)");
+    }
 
     /*
      * ============================================================
