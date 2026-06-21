@@ -27,20 +27,25 @@ ifeq ($(SDK_PATH),)
 endif
 
 # ─── Kernel Headers ──────────────────────────────────────────────
-# MacKernelSDK structure: /Headers/IOKit/, /Headers/libkern/, etc.
-# 1st: MacKernelSDK Headers/
-# 2nd: MacKernelSDK Kernel.framework (older layout)
-# 3rd: Built-in Xcode SDK fallback
+# MacKernelSDK (acidanthera) structure: Headers/ directly
+# ถ้าไม่พบ → fallback ใช้ SDK built-in (Xcode 14-15)
 KERNEL_HDRS = $(SDK_DIR)
 ifneq ($(wildcard $(SDK_DIR)/Headers),)
-    KERNEL_HDRS := $(SDK_DIR)/Headers
+    KERNEL_HDRS := $(SDK_DIR)
 else ifneq ($(wildcard $(SDK_DIR)/Kernel.framework/Headers),)
-    KERNEL_HDRS := $(SDK_DIR)/Kernel.framework/Headers
+    KERNEL_HDRS := $(SDK_DIR)
 else
-    KERNEL_HDRS := $(SDK_PATH)/System/Library/Frameworks/Kernel.framework/Headers
+    KERNEL_HDRS := $(SDK_PATH)
 endif
 
 # ─── Compiler Flags ──────────────────────────────────────────────
+# -mkernel          : kernel ABI (no mxcsr, etc.)
+# -arch x86_64      : Intel 64-bit เท่านั้น (ARM64 สำหรับ Apple Silicon)
+# -nostdlib         : ไม่ลิงก์ libc (ใช้ kernel libs แทน)
+# -fno-exceptions   : IOKit ห้ามใช้ C++ exceptions
+# -fno-rtti         : IOKit ห้ามใช้ RTTI (ใช้ OSDynamicCast แทน)
+# -DKERNEL          : 定义 kernel build
+# -D__STRICT_BSD__  : strict POSIX/BSD namespaces
 CXXFLAGS = -std=c++11 \
            -mkernel \
            -arch x86_64 \
@@ -50,7 +55,9 @@ CXXFLAGS = -std=c++11 \
            -fno-rtti \
            -DKERNEL \
            -D__STRICT_BSD__ \
-           -I$(KERNEL_HDRS)
+           -I$(KERNEL_HDRS) \
+           -I$(SDK_PATH)/System/Library/Frameworks/Kernel.framework/Headers \
+           -I$(SDK_PATH)/usr/include
 
 # ─── Linker Flags ────────────────────────────────────────────────
 # -r              : relocatable object (kext = kernel module)

@@ -7,10 +7,6 @@ on:
     branches: [ main, master ]
   workflow_dispatch:
 
-permissions:
-  contents: write
-  issues: write
-
 jobs:
   build:
     name: Build Kernel Extension
@@ -31,44 +27,21 @@ jobs:
 
     - name: Compile Kext via Makefile
       run: |
-        make KERNEL_SDK_DIR="${{ github.workspace }}/MacKernelSDK" 2>&1 | tee /tmp/build.log
+        make KERNEL_SDK_DIR="${{ github.workspace }}/MacKernelSDK"
 
     - name: Verify Kext Binary Output
       run: |
         if [ ! -f "MyIntelGPU.kext/Contents/MacOS/MyIntelGPU" ]; then
           echo "❌ Build failed — binary not found"
-          cat /tmp/build.log
           exit 1
         fi
         echo "✅ Build success!"
         ls -la MyIntelGPU.kext/Contents/MacOS/MyIntelGPU
 
     - name: Upload Kext to GitHub Artifacts
-      if: success()
       uses: actions/upload-artifact@v4
       with:
         name: MyIntelGPU.kext
         path: MyIntelGPU.kext/
         if-no-files-found: error
         retention-days: 7
-
-    - name: Upload Build Log
-      if: failure()
-      uses: actions/upload-artifact@v4
-      with:
-        name: build-log
-        path: /tmp/build.log
-        retention-days: 7
-
-    - name: Publish Build Log to Repo
-      if: failure()
-      run: |
-        mkdir -p .ci-logs
-        cp /tmp/build.log ".ci-logs/build-error-${{ github.run_number }}.log"
-        git config user.name "CI Build Bot"
-        git config user.email "ci-bot@users.noreply.github.com"
-        git add .ci-logs/
-        git commit -m "ci: save build error log for run #${{ github.run_number }}" --allow-empty
-        git push origin HEAD:ci-logs --force 2>&1 || echo "git push failed"
-
-
