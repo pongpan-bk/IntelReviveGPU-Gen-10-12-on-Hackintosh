@@ -26,6 +26,7 @@
  *///=========================================================================
 
 #include "MyIntelGPU.hpp"
+#include <IOKit/IOInterruptEventSource.h>
 #include <libkern/libkern.h>
 #include <libkern/OSAtomic.h>
 #include <IOKit/IOLib.h>
@@ -1495,7 +1496,7 @@ bool MyIntelGPU::allocScanoutBuffer(uint32_t width, uint32_t height, uint32_t bp
 
     /* Get physical address of first (contiguous) segment */
     IOByteCount segLen = 0;
-    addr64_t physAddr = desc->getPhysicalSegment64(0, &segLen, kIOMemoryMapperNone);
+    addr64_t physAddr = desc->getPhysicalSegment(0, &segLen, kIOMemoryMapperNone);
     if (!physAddr || segLen < (IOByteCount)(numPages * GTT_PAGE_SIZE)) {
         IODebug("allocScanout: not contiguous (segLen=%llu need=%u)",
                 (uint64_t)segLen, numPages * GTT_PAGE_SIZE);
@@ -2560,7 +2561,7 @@ bool MyIntelGPU::setupDDIB(void)
     }
 
     IOByteCount segLen = 0;
-    addr64_t physAddr = desc->getPhysicalSegment64(0, &segLen, kIOMemoryMapperNone);
+    addr64_t physAddr = desc->getPhysicalSegment(0, &segLen, kIOMemoryMapperNone);
     if (!physAddr || segLen < (IOByteCount)(numPages * GTT_PAGE_SIZE)) {
         desc->complete(kIODirectionOut);
         desc->release();
@@ -2667,7 +2668,7 @@ bool MyIntelGPU::setupDDIC(void)
     }
 
     IOByteCount segLen = 0;
-    addr64_t physAddr = desc->getPhysicalSegment64(0, &segLen, kIOMemoryMapperNone);
+    addr64_t physAddr = desc->getPhysicalSegment(0, &segLen, kIOMemoryMapperNone);
     if (!physAddr) {
         desc->complete(kIODirectionOut); desc->release();
         IOFreeAligned(va, bufSize);
@@ -3091,8 +3092,7 @@ bool MyIntelGPU::initInterrupts(void)
     /* Step 2: Install interrupt event source */
     fInterruptSource = IOInterruptEventSource::interruptEventSource(
                            this,
-                           OSMemberFunctionCast(IOInterruptEventAction, this,
-                               &MyIntelGPU::handleInterrupt),
+                           OSMemberFunctionCast(IOInterruptAction, this, &MyIntelGPU::handleInterrupt),
                            fPCIDevice,
                            0);
     if (!fInterruptSource) {

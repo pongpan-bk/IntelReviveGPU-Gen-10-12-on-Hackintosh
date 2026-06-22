@@ -25,6 +25,8 @@
 #include <IOKit/IOMemoryDescriptor.h>
 #include <IOKit/IOLib.h>
 
+#define DP_TP_CTL_LINK_TRAIN_MASK (3U << 27)
+
 #pragma mark - Constants & Register Offsets
 
 /*
@@ -232,7 +234,7 @@
 #define DDI_AUX_CTL_ADDR(x)     (((x) & 0x7) << DDI_AUX_CTL_ADDR_SHIFT)
 #define DDI_AUX_CTL_TIMER_SHIFT 8
 #define DDI_AUX_CTL_TIMER_400US (0x3 << DDI_AUX_CTL_TIMER_SHIFT)
-#define DDI_AUX_CTL_MSG_SIZE(x) ((x) & 0xF)
+#define DP_TP_CTL_LINK_TRAIN_MASK (3U << 27)
 
 /* DP Transport Control bits */
 #define DP_TP_CTL_ENABLE        (1U << 31)
@@ -1174,6 +1176,7 @@ private:
 
     /* Framebuffer State */
     IOMemoryDescriptor      *fScanoutDesc;      /*!< IOMemoryDescriptor backing scanout */
+    IOMemoryDescriptor *fScanoutBuffer;
     void                    *fScanoutBufferVA;   /*!< Kernel virtual address of scanout buffer */
     IOPhysicalAddress        fScanoutBufferPA;   /*!< Physical address of scanout buffer */
     uint32_t                 fScanoutBufferSize; /*!< Allocated size in bytes */
