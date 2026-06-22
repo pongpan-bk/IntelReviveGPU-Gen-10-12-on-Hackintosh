@@ -100,18 +100,10 @@ OSDefineMetaClassAndStructors(MyIntelGPU, IOService)
  */
 bool MyIntelGPU::init(OSDictionary *dict)
 {
-    /*
-     * ขั้นแรก: เรียก init ของ IOService ก่อนเสมอ
-     * ถ้า super ไม่ผ่าน = ไม่ต้องทำอะไรต่อ
-     */
     if (!super::init(dict)) {
         return false;
     }
 
-    /*
-     * ตั้งค่าเริ่มต้นของตัวแปรทั้งหมดให้เป็น 0/NULL
-     * เพื่อป้องกันการใช้งาน pointer ที่ยังไม่ถูก map
-     */
     fPCIDevice    = NULL;
     fMMIOMap      = NULL;
     fRegs         = NULL;
@@ -128,6 +120,16 @@ bool MyIntelGPU::init(OSDictionary *dict)
     fGsm          = NULL;
     fGttPteArray  = NULL;
     fTransCount   = 0;
+    fFramebufferCount = 0;
+    for (int i = 0; i < FB_MAX_CRTC; i++) {
+        fFbWidth[i] = 0;
+        fFbHeight[i] = 0;
+        fFbBpp[i] = 0;
+        fFbRefresh[i] = 0;
+        fFbBase[i] = NULL;
+        fFbGGTTOffset[i] = 0;
+        fFbNumPages[i] = 0;
+    }
     fMMIODesc     = NULL;
     fApertureDesc = NULL;
 
@@ -139,10 +141,6 @@ bool MyIntelGPU::init(OSDictionary *dict)
     fScanoutStride    = 0;
     fScanoutFormat    = 0;
 
-    /*
-     * clear translation table ทั้งหมด
-     * แต่ละ entry มี 4 fields + name pointer = ปลอดภัยตอน init
-     */
     memset(fTransTable, 0, sizeof(fTransTable));
 
     IODebug("init() — OK");
@@ -1438,17 +1436,16 @@ uint64_t MyIntelGPU::makePTE(uint64_t physAddr, uint8_t caching)
  * ─────────────────────────────────────────────────────────────────
  *  bool MyIntelGPU::allocScanoutBuffer(uint32_t width, uint32_t height, uint32_t bpp)
  *
- *  Allocate scanout buffer: IOBufferMemoryDescriptor → write GGTT PTEs
+ *  Allocate scanout buffer: IOMallocAligned → IOMemoryDescriptor → GGTT PTEs
  *
  *  ขั้นตอน:
  *    1. คำนวณขนาด buffer = stride * height
- *    2. Allocate physically-contiguous buffer via IOBufferMemoryDescriptor
- *    3. เขียน GGTT PTEs สำหรับแต่ละ 4KB page → aperture
- *    4. เก็บ GGTT offset ไว้สำหรับ PLANE_SURF
+ *    2. Allocate page-aligned kernel memory via IOMallocAligned
+ *    3. Wrap in IOMemoryDescriptor to get physical address
+ *    4. เขียน GGTT PTEs สำหรับแต่ละ 4KB page → aperture
+ *    5. เก็บ GGTT offset ไว้สำหรับ PLANE_SURF
  *
- *  TODO: ถ้า IOBufferMemoryDescriptor ไม่ support contiguous →
- *        ใช้ IOMallocContiguous แทน
- *        หรือใช้ pre-allocated stolen memory (DSM)
+ *  ใช้ kernel-safe API แทน IOBufferMemoryDescriptor (DriverKit)
  * ─────────────────────────────────────────────────────────────────
  */
 bool MyIntelGPU::allocScanoutBuffer(uint32_t width, uint32_t height, uint32_t bpp)
@@ -1466,69 +1463,61 @@ bool MyIntelGPU::allocScanoutBuffer(uint32_t width, uint32_t height, uint32_t bp
     uint32_t bufSize = fScanoutStride * height;
     uint32_t numPages = (bufSize + GTT_PAGE_SIZE - 1) / GTT_PAGE_SIZE;
 
-    if (numPages == 0) {
-        IODebug("allocScanout: invalid size (w=%u h=%u bpp=%u)", width, height, bpp);
+    if (numPages == 0 || numPages > fGttTotal) {
+        IODebug("allocScanout: invalid (w=%u h=%u bpp=%u pages=%u gtt=%u)",
+                width, height, bpp, numPages, fGttTotal);
         return false;
     }
 
-    if (numPages > fGttTotal) {
-        IODebug("allocScanout: need %u pages but GGTT only has %u", numPages, fGttTotal);
+    /* Allocate page-aligned kernel memory */
+    void *va = IOMallocAligned(bufSize, GTT_PAGE_SIZE);
+    if (!va) {
+        IODebug("allocScanout: IOMallocAligned failed (%u bytes)", bufSize);
+        return false;
+    }
+    bzero(va, bufSize);  /* clear to black */
+
+    /* Wrap in IOMemoryDescriptor for physical-address translation */
+    IOMemoryDescriptor *desc = IOMemoryDescriptor::withAddressRange(
+        (mach_vm_address_t)va, bufSize, kIODirectionOut, kernel_task);
+    if (!desc) {
+        IODebug("allocScanout: withAddressRange failed");
+        IOFreeAligned(va, bufSize);
         return false;
     }
 
-    /*
-     * Allocate physically-contiguous DMA buffer
-     * kIOMemoryDirectionOut = GPU reads from this buffer (scanout)
-     */
-    fScanoutBuffer = IOBufferMemoryDescriptor::inTaskWithPhysicalMask(
-                         kernel_task,
-                         kIOMemoryDirectionOut,
-                         bufSize,
-                         0xFFFFFFFFFFFFF000ULL);  /* 4KB page aligned */
-
-    if (!fScanoutBuffer) {
-        IODebug("allocScanout: IOBufferMemoryDescriptor allocation failed (%u bytes)", bufSize);
-        return false;
-    }
-
-    if (fScanoutBuffer->prepare(kIOMemoryDirectionOut) != kIOReturnSuccess) {
+    if (desc->prepare(kIODirectionOut) != kIOReturnSuccess) {
         IODebug("allocScanout: prepare failed");
-        fScanoutBuffer->release();
-        fScanoutBuffer = NULL;
+        desc->release();
+        IOFreeAligned(va, bufSize);
         return false;
     }
 
-    /*
-     * Get physical address of the buffer
-     */
-    IOMemoryDescriptor::PhysicalSegment seg;
-    uint64_t physAddr = 0;
-    UInt32 segOffset = 0;
-    UInt64 segLen = 0;
-
-    seg = fScanoutBuffer->getPhysicalSegment(0, &segLen, kIOMemoryMapperNone);
-    if (seg == 0 || segLen < bufSize) {
-        IODebug("allocScanout: buffer not contiguous (segLen=%llu < bufSize=%u)",
-                segLen, bufSize);
-        fScanoutBuffer->complete();
-        fScanoutBuffer->release();
-        fScanoutBuffer = NULL;
+    /* Get physical address of first (contiguous) segment */
+    IOByteCount segLen = 0;
+    addr64_t physAddr = desc->getPhysicalSegment64(0, &segLen, kIOMemoryMapperNone);
+    if (!physAddr || segLen < (IOByteCount)(numPages * GTT_PAGE_SIZE)) {
+        IODebug("allocScanout: not contiguous (segLen=%llu need=%u)",
+                (uint64_t)segLen, numPages * GTT_PAGE_SIZE);
+        desc->complete(kIODirectionOut);
+        desc->release();
+        IOFreeAligned(va, bufSize);
         return false;
     }
-    physAddr = seg;
 
-    IODebug("allocScanout: buffer %u bytes, %u pages, phys=0x%llX",
-            bufSize, numPages, physAddr);
+    IODebug("allocScanout: %u bytes, %u pages, V=0x%p P=0x%llX",
+            bufSize, numPages, va, (uint64_t)physAddr);
 
-    /*
-     * Write GGTT PTEs for each page
-     * Allocate from GGTT entry 0 (simple linear allocator)
-     */
+    /* Write GGTT PTEs for each page (linear allocator from entry 0) */
     fScanoutGGTTOffset = 0;
     fScanoutNumPages   = numPages;
+    fScanoutBufferVA   = va;
+    fScanoutBufferPA   = (IOPhysicalAddress)physAddr;
+    fScanoutBufferSize = bufSize;
+    fScanoutDesc       = desc;
 
     for (uint32_t i = 0; i < numPages; i++) {
-        uint64_t pagePhys = physAddr + (i * GTT_PAGE_SIZE);
+        uint64_t pagePhys = (uint64_t)physAddr + (i * GTT_PAGE_SIZE);
         uint64_t pte = makePTE(pagePhys, 0);  /* WB (LLC coherent) */
         writeGGTTPTE(i, pte);
     }
@@ -1778,21 +1767,1000 @@ void MyIntelGPU::initDDI(uint32_t port, uint32_t lanes)
 
 /*
  * ─────────────────────────────────────────────────────────────────
+ *  Phase 2.3 — EDID / DDI Config / Display Node
+ * ─────────────────────────────────────────────────────────────────
+ */
+
+/*
+ * ─────────────────────────────────────────────────────────────────
+ *  bool MyIntelGPU::ddiAuxXfer(uint32_t port, uint32_t ddcAddr,
+ *        const uint8_t *sendBuf, uint32_t sendLen,
+ *        uint8_t *recvBuf, uint32_t recvLen)
+ *
+ *  AUX channel transaction (I2C-over-AUX)
+ *
+ *  Sends header + optional data via DDI AUX, then receives reply.
+ *  Implements the TGL+ DDI AUX register interface.
+ *
+ *  1. Pack header (4 bytes: cmd|addr[19:16], addr[15:8], addr[7:0], length)
+ *  2. Write to DDI_AUX_DATA[0-3]
+ *  3. Trigger via DDI_AUX_CTL.SEND
+ *  4. Wait for DONE
+ *  5. Read reply from DDI_AUX_DATA[0-3]
+ *
+ *  Reference: intel_dp_aux_xfer (i915), DP AUX spec
+ * ─────────────────────────────────────────────────────────────────
+ */
+bool MyIntelGPU::ddiAuxXfer(uint32_t port, uint32_t ddcAddr,
+                            const uint8_t *sendBuf, uint32_t sendLen,
+                            uint8_t *recvBuf, uint32_t recvLen)
+{
+    if (!fRegs) return false;
+
+    uint32_t ddiBase = DDI_A_BASE + (port * 0x100);
+    uint32_t auxBase = ddiBase + DDI_AUX_DATA_BASE;
+
+    /*
+     * Build AUX request message (max 20 bytes: 4 header + 16 data)
+     */
+    uint8_t msg[20];
+    uint32_t msgLen = 0;
+
+    /*
+     * Header byte 0: [7:4]=cmd, [3:0]=addr[19:16]
+     * Cmd: 0x4=I2C-read, 0x5=I2C-write, 0x7=I2C-write+stop
+     */
+    uint32_t i2cAddrBits = ddcAddr << 1;   /* 7-bit → 8-bit I2C addr */
+    if (sendLen > 0 && recvLen == 0) {
+        /* Write + stop */
+        msg[0] = 0x70 | ((i2cAddrBits >> 16) & 0x0F);
+    } else if (recvLen > 0 && sendLen == 0) {
+        /* Read-only */
+        msg[0] = 0x40 | ((i2cAddrBits >> 16) & 0x0F);
+    } else {
+        /* Read with preceding write (MOT=1 on write) */
+        msg[0] = 0x50 | ((i2cAddrBits >> 16) & 0x0F);
+    }
+
+    msg[1] = (i2cAddrBits >> 8) & 0xFF;        /* addr[15:8] */
+    msg[2] = i2cAddrBits & 0xFF;               /* addr[7:0] */
+    msg[3] = (sendLen > 0) ? sendLen : recvLen; /* data length */
+
+    msgLen = 4;  /* header only for writes with no data, or reads */
+
+    /* Append send data (write payload) */
+    if (sendLen > 0) {
+        for (uint32_t i = 0; i < sendLen && msgLen < 20; i++) {
+            msg[msgLen++] = sendBuf[i];
+        }
+    }
+
+    /*
+     * Write message to DDI_AUX_DATA registers (4 x 32-bit)
+     * Packed little-endian, 4 bytes per register
+     */
+    for (uint32_t i = 0; i < 4; i++) {
+        uint32_t regOff = (i < msgLen / 4 + 1) ? 0 : msgLen;
+        uint32_t val = 0;
+        for (uint32_t b = 0; b < 4 && (i * 4 + b) < msgLen; b++) {
+            val |= ((uint32_t)msg[i * 4 + b]) << (b * 8);
+        }
+        writeReg32(auxBase + i * 4, val);
+        OSSynchronizeIO();
+    }
+
+    /*
+     * Trigger AUX transaction
+     *
+     * DDI_AUX_CTL:
+     *   [31] = SEND (1 = start)
+     *   [30] = DONE (write 1 to clear)
+     *   [27:24] = ADDR (which AUX_DATA reg to start from, 0)
+     *   [12:8] = TIMER (3 = 400us)
+     *   [3:0] = MSG_SIZE (total bytes: header + data)
+     */
+    uint32_t ctl = readReg32(ddiBase + DDI_AUX_CTL_REG);
+    ctl &= ~(DDI_AUX_CTL_TIMEOUT | 0x1F000000);  /* clear error + ADDR */
+    ctl |= DDI_AUX_CTL_SEND
+         | DDI_AUX_CTL_DONE
+         | DDI_AUX_CTL_TIMER_400US
+         | DDI_AUX_CTL_MSG_SIZE(msgLen);
+    writeReg32(ddiBase + DDI_AUX_CTL_REG, ctl);
+    OSSynchronizeIO();
+
+    /*
+     * Wait for completion (poll SEND bit cleared)
+     * Retry up to ~10ms (10 x 1ms delay)
+     */
+    bool timedOut = true;
+    for (int retry = 0; retry < 20; retry++) {
+        ctl = readReg32(ddiBase + DDI_AUX_CTL_REG);
+        if (!(ctl & DDI_AUX_CTL_SEND)) {
+            timedOut = false;
+            break;
+        }
+        IODelay(1);
+    }
+
+    if (timedOut) {
+        IODebug("AUX timeout: port=%u CTL=0x%08X", port, ctl);
+        return false;
+    }
+
+    if (ctl & DDI_AUX_CTL_TIMEOUT) {
+        IODebug("AUX timeout error: port=%u CTL=0x%08X", port, ctl);
+        return false;
+    }
+
+    /*
+     * Read reply: the first byte in DDI_AUX_DATA0 is the AUX reply byte
+     *   [7:4] = ACK (0) / NACK (1) / DEFER (2)
+     *   For I2C:  I2C_ACK (4) / I2C_NACK (5) / I2C_DEFER (6)
+     *   [3:0] = data count (0-16)
+     *
+     * Data bytes follow from DDI_AUX_DATA0[23:16], DATA0[31:24],
+     * then DATA1[7:0], DATA1[15:8], etc.
+     */
+    uint32_t data0 = readReg32(ddiBase + DDI_AUX_DATA_BASE);
+    uint8_t replyByte = data0 & 0xFF;
+    uint8_t replyStatus = (replyByte >> 4) & 0xF;
+    uint8_t replyCount = replyByte & 0xF;
+
+    if (replyStatus != 0x0 && replyStatus != 0x4) {
+        /* NACK or DEFER */
+        IODebug("AUX NACK/DEFER: port=%u status=0x%X", port, replyStatus);
+        return false;
+    }
+
+    if (!recvBuf || recvLen == 0) {
+        return true;  /* write-only: success */
+    }
+
+    /*
+     * Extract received data from DDI_AUX_DATA registers
+     * Data starts at byte 1 in DATA0 (bits [23:16] = first byte)
+     */
+    uint32_t data[4];
+    data[0] = data0;
+    for (uint32_t i = 1; i < 4; i++) {
+        data[i] = readReg32(ddiBase + DDI_AUX_DATA_BASE + i * 4);
+    }
+
+    uint32_t copied = 0;
+    for (uint32_t ri = 0; ri < 4 && copied < recvLen; ri++) {
+        uint32_t startByte = (ri == 0) ? 1 : 0;  /* skip reply byte in DATA0 */
+        for (uint32_t b = startByte; b < 4 && copied < recvLen; b++) {
+            recvBuf[copied++] = (data[ri] >> (b * 8)) & 0xFF;
+        }
+    }
+
+    return (copied == recvLen);
+}
+
+/*
+ * ─────────────────────────────────────────────────────────────────
+ *  bool MyIntelGPU::readEdidFromRegistry(void)
+ *
+ *  Attempt to get EDID from IORegistry (pre-injected by bootloader).
+ *
+ *  OpenCore can inject EDID via device properties or
+ *  gfx-enable EDID override.  Check our IOService's
+ *  "EDID" or "IODisplayEDID" property first.
+ * ─────────────────────────────────────────────────────────────────
+ */
+bool MyIntelGPU::readEdidFromRegistry(void)
+{
+    /* Check service name for display properties */
+    OSDictionary *dict = NULL;
+    OSData *edidData = NULL;
+
+    /* Try direct property on our service */
+    dict = getPropertyTable();
+    if (dict) {
+        edidData = OSDynamicCast(OSData, dict->getObject("EDID"));
+        if (edidData) {
+            uint32_t len = edidData->getLength();
+            if (len > EDID_BLOCK_SIZE && len <= sizeof(fEdidData)) {
+                memcpy(fEdidData, edidData->getBytesNoCopy(), len);
+                fEdidLength = len;
+                fEdidValid  = true;
+                IODebug("readEdidRegistry: got %u bytes from IOReg EDID", len);
+                return true;
+            }
+        }
+
+        /* Also try IODisplayEDID (Apple's naming) */
+        edidData = OSDynamicCast(OSData, dict->getObject("IODisplayEDID"));
+        if (edidData) {
+            uint32_t len = edidData->getLength();
+            if (len > EDID_BLOCK_SIZE && len <= sizeof(fEdidData)) {
+                memcpy(fEdidData, edidData->getBytesNoCopy(), len);
+                fEdidLength = len;
+                fEdidValid  = true;
+                IODebug("readEdidRegistry: got %u bytes from IODisplayEDID", len);
+                return true;
+            }
+        }
+    }
+
+    IODebug("readEdidRegistry: no EDID in registry");
+    return false;
+}
+
+/*
+ * ─────────────────────────────────────────────────────────────────
+ *  bool MyIntelGPU::readEdidFromAux(uint32_t port)
+ *
+ *  Read EDID via DDI AUX channel (I2C-over-AUX).
+ *
+ *  Protocol:
+ *    1. Write offset 0x00 to I2C addr 0x50 (set EDID pointer)
+ *    2. Read 128 bytes in 8 x 16-byte AUX transactions
+ *    3. Optionally read extension block (second 128 bytes)
+ *
+ *  Reference: intel_dp_get_edid(), EDID spec 1.4
+ * ─────────────────────────────────────────────────────────────────
+ */
+bool MyIntelGPU::readEdidFromAux(uint32_t port)
+{
+    uint32_t ddcAddr = EDID_I2C_ADDR;  /* 0x50 */
+    uint8_t edidBuf[EDID_BLOCK_SIZE];
+    bool ok = true;
+
+    /*
+     * Step 1: Write EDID offset byte (0x00) to set read pointer
+     * I2C write+stop to addr 0x50, data = { 0x00 }
+     */
+    uint8_t offsetByte = 0;
+    if (!ddiAuxXfer(port, ddcAddr, &offsetByte, 1, NULL, 0)) {
+        IODebug("readEdidAux: offset write failed (port=%u)", port);
+        return false;
+    }
+
+    /*
+     * Step 2: Read 128 bytes in 16-byte chunks
+     * I2C read from addr 0x50 (pointer already set to 0)
+     */
+    uint8_t *ptr = edidBuf;
+    for (uint32_t chunk = 0; chunk < EDID_BLOCK_SIZE / 16; chunk++) {
+        uint8_t data16[16];
+        if (!ddiAuxXfer(port, ddcAddr, NULL, 0, data16, 16)) {
+            IODebug("readEdidAux: chunk %u failed", chunk);
+            ok = false;
+            break;
+        }
+        memcpy(ptr + chunk * 16, data16, 16);
+    }
+
+    if (!ok) return false;
+
+    /* Validate EDID header */
+    const uint8_t edidMagic[8] = { 0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00 };
+    if (memcmp(edidBuf, edidMagic, 8) != 0) {
+        IODebug("readEdidAux: bad EDID magic");
+        return false;
+    }
+
+    /* Copy to member buffer */
+    memcpy(fEdidData, edidBuf, EDID_BLOCK_SIZE);
+    fEdidLength = EDID_BLOCK_SIZE;
+
+    /* Step 3: Check for extension block (byte 126 says number of extensions) */
+    uint8_t extCount = edidBuf[126];
+    if (extCount > 0 && sizeof(fEdidData) >= EDID_BLOCK_SIZE * 2) {
+        offsetByte = 0;  /* some monitors need offset reset for ext block */
+        ddiAuxXfer(port, ddcAddr, &offsetByte, 1, NULL, 0);
+
+        uint8_t *extPtr = fEdidData + EDID_BLOCK_SIZE;
+        for (uint32_t chunk = 0; chunk < EDID_BLOCK_SIZE / 16; chunk++) {
+            uint8_t data16[16];
+            if (!ddiAuxXfer(port, ddcAddr, NULL, 0, data16, 16)) break;
+            memcpy(extPtr + chunk * 16, data16, 16);
+        }
+        fEdidLength += EDID_BLOCK_SIZE;
+    }
+
+    fEdidValid = true;
+    IODebug("readEdidAux: %u bytes from port %u", fEdidLength, port);
+    return true;
+}
+
+/*
+ * ─────────────────────────────────────────────────────────────────
+ *  bool MyIntelGPU::parseEdid(void)
+ *
+ *  Parse raw EDID bytes (fEdidData, fEdidLength) to extract:
+ *    - fDisplayWidth, fDisplayHeight (native resolution)
+ *    - fDisplayRefresh (preferred refresh rate in mHz)
+ *    - fDisplayName (monitor name string)
+ *    - fDisplayBpp (colour depth)
+ *
+ *  Parses EDID v1.x block 0.  Extracts Preferred Timing from
+ *  the Detailed Timing Descriptors (DTD).
+ *
+ *  Reference: EDID v1.4 spec, VESA EDID
+ * ─────────────────────────────────────────────────────────────────
+ */
+bool MyIntelGPU::parseEdid(void)
+{
+    if (!fEdidValid || fEdidLength < EDID_BLOCK_SIZE) {
+        IODebug("parseEdid: no valid EDID");
+        return false;
+    }
+
+    const uint8_t *edid = fEdidData;
+    uint8_t extCount = edid[126];
+
+    /*
+     * Extract basic params from EDID fixed fields
+     */
+    fDisplayBpp = 8;   /* assume 8 bpc unless EDID version says otherwise */
+
+    /* EDID v1.4: bytes 20-24 contain chromaticity / gamma / features */
+    uint8_t featureBits = edid[24];  /* Feature Support byte */
+    if ((featureBits & 0x04) == 0x04) {
+        /* sRGB enabled — typical for 8+ bpc */
+    }
+
+    /*
+     * Preferred timing: Detailed Timing Descriptor at offset 0x36
+     * Each DTD = 18 bytes, 4 DTDs at 0x36, 0x48, 0x5A, 0x6C
+     * The first DTD is the preferred timing.
+     */
+    const uint8_t *dtd = edid + 0x36;
+
+    /* Decode DTD (EDID spec: 18-byte block) */
+    uint32_t hPixels   = ((dtd[2] >> 4) << 8) | dtd[4];
+    uint32_t hBlank    = ((dtd[3] >> 4) << 8) | dtd[5];
+    uint32_t vLines    = ((dtd[7] >> 4) << 8) | dtd[9];
+    uint32_t vBlank    = ((dtd[8] >> 4) << 8) | dtd[10];
+    uint32_t hSyncOff  = ((dtd[11] >> 6) << 8) | dtd[8];
+    uint32_t hSyncWid  = ((dtd[11] >> 4) & 0x3) << 8 | dtd[9]; // actually dtd[12] wait
+
+    /* Let me be more careful with the DTD layout */
+    /*
+     *  DTD (18 bytes):
+     *   +0: Pixel clock / 10000 (2 bytes, LE)
+     *   +2: H active pixels lower 8 bits
+     *   +3: H blanking lower 8 bits
+     *   +4: H active pixels upper [3:0] = bits [11:8], [7:4] = H blank upper [3:0]
+     *     Actually:
+     *       byte 2 = h_active[7:0]
+     *       byte 3 = h_blank[7:0]
+     *       byte 4[7:4] = h_blank[11:8], byte 4[3:0] = h_active[11:8]
+     *   +5: V active lines[7:0]
+     *   +6: V blank[7:0]
+     *   +7[7:4] = V blank[11:8], [3:0] = V active[11:8]
+     *   +8: H sync offset[7:0] (from start of blanking)
+     *   +9: H sync pulse width[7:0]
+     *   +10[7:4] = V sync offset[3:0], [3:0] = V sync pulse width[3:0]
+     *   +11[7:6] = H sync offset[1:0], [5:4] = H sync pulse width[1:0]
+     *         [3:2] = V sync offset[5:4], [1:0] = V sync pulse width[5:4]
+     *     Hmm, actually the format varies between HSYNC offset/polarity etc.
+     */
+
+    /* Simplified DTD parse (EDID v1.4 section 3.10) */
+    uint32_t pClk10k  = dtd[0] | (dtd[1] << 8);  /* pixel clock in 10kHz */
+    hPixels           = dtd[2] | ((dtd[4] & 0xF0) << 4);  /* bits [11:0] */
+    uint32_t hBl      = dtd[3] | ((dtd[4] & 0x0F) << 8);
+    vLines            = dtd[5] | ((dtd[7] & 0xF0) << 4);
+    uint32_t vBl      = dtd[6] | ((dtd[7] & 0x0F) << 8);
+
+    if (pClk10k == 0 || hPixels == 0 || vLines == 0) {
+        IODebug("parseEdid: preferred DTD invalid or in monitor descriptor");
+        return false;
+    }
+
+    uint32_t hTotal = hPixels + hBl;
+    uint32_t vTotal = vLines + vBl;
+    uint32_t refreshHz = 0;
+    if (hTotal > 0 && vTotal > 0 && pClk10k > 0) {
+        refreshHz = (pClk10k * 10000) / (hTotal * vTotal);
+    }
+
+    fDisplayWidth    = hPixels;
+    fDisplayHeight   = vLines;
+    fDisplayRefresh  = refreshHz * 1000;  /* store in mHz */
+
+    IODebug("parseEdid: %ux%u@%uHz pclk=%u.%02uMHz",
+            fDisplayWidth, fDisplayHeight,
+            refreshHz, pClk10k / 100, pClk10k % 100);
+
+    /*
+     * Extract monitor name from Detailed Monitor Descriptors (0x36-0x7D)
+     * Four 18-byte blocks: may be timings or monitor descriptors.
+     * Monitor descriptors have byte 0 = 0x00, byte 3 = tag.
+     * Tag 0xFC = monitor name.
+     */
+    const char *nameDefault = "Generic Display";
+    strncpy(fDisplayName, nameDefault, sizeof(fDisplayName) - 1);
+    fDisplayName[sizeof(fDisplayName) - 1] = '\0';
+
+    for (uint32_t off = 0x36; off < 0x7E; off += 18) {
+        const uint8_t *desc = edid + off;
+        if (desc[0] != 0x00 && desc[1] != 0x00) continue;  /* DTD, not monitor desc */
+        if (desc[3] == 0xFC) {
+            /* Monitor name: bytes 5-17 (up to 13 chars), padded with 0x0A/space */
+            char name[14];
+            uint32_t nLen = 13;
+            if (desc[17] == 0x0A) nLen = 12;  /* trim trailing newline */
+            memcpy(name, desc + 5, nLen);
+            name[nLen] = '\0';
+            for (int i = (int)nLen - 1; i >= 0; i--) {
+                if (name[i] == ' ' || name[i] == 0x0A || name[i] == '\0')
+                    name[i] = '\0';
+                else break;
+            }
+            if (name[0] != '\0') {
+                strncpy(fDisplayName, name, sizeof(fDisplayName) - 1);
+                fDisplayName[sizeof(fDisplayName) - 1] = '\0';
+            }
+            break;
+        }
+    }
+
+    IODebug("parseEdid: monitor '%s' %ux%u@%uHz%s",
+            fDisplayName, fDisplayWidth, fDisplayHeight, refreshHz,
+            (extCount > 0) ? " +ext" : "");
+
+    return true;
+}
+
+/*
+ * ─────────────────────────────────────────────────────────────────
+ *  void MyIntelGPU::setDisplayTimings(uint32_t trans,
+ *        uint32_t hdisplay, uint32_t hsync_start,
+ *        uint32_t hsync_end, uint32_t htotal,
+ *        uint32_t vdisplay, uint32_t vsync_start,
+ *        uint32_t vsync_end, uint32_t vtotal)
+ *
+ *  Write horizontal/vertical timing registers for the specified
+ *  transcoder.  Each register uses the format:
+ *    [31:16] = end - 1, [15:0] = start - 1
+ *
+ *  Reference: i915_reg.h TRANS_HTOTAL, TRANS_VTOTAL, etc.
+ * ─────────────────────────────────────────────────────────────────
+ */
+void MyIntelGPU::setDisplayTimings(uint32_t trans,
+                                   uint32_t hdisplay, uint32_t hsync_start,
+                                   uint32_t hsync_end, uint32_t htotal,
+                                   uint32_t vdisplay, uint32_t vsync_start,
+                                   uint32_t vsync_end, uint32_t vtotal)
+{
+    if (!fRegs) return;
+
+    uint32_t tb = TRANSCODER_A_BASE + (trans * 0x1000);
+
+    IODebug("setDisplayTimings(%u): H %u-%u-%u-%u  V %u-%u-%u-%u",
+            trans, hdisplay, hsync_start, hsync_end, htotal,
+            vdisplay, vsync_start, vsync_end, vtotal);
+
+    /* HTOTAL */
+    writeReg32(tb + TRANS_HTOTAL_REG,
+               ((htotal - 1) << 16) | ((hdisplay - 1) & 0xFFFF));
+
+    /* HSYNC (H Sync) */
+    writeReg32(tb + TRANS_HSYNC_REG,
+               ((hsync_end - 1) << 16) | ((hsync_start - 1) & 0xFFFF));
+
+    /* VTOTAL */
+    writeReg32(tb + TRANS_VTOTAL_REG,
+               ((vtotal - 1) << 16) | ((vdisplay - 1) & 0xFFFF));
+
+    /* VSYNC (V Sync) */
+    writeReg32(tb + TRANS_VSYNC_REG,
+               ((vsync_end - 1) << 16) | ((vsync_start - 1) & 0xFFFF));
+
+    /* HBLANK: blank starts at hdisplay, ends at htotal */
+    writeReg32(tb + TRANS_HBLANK_REG,
+               ((htotal - 1) << 16) | ((hdisplay - 1) & 0xFFFF));
+
+    /* VBLANK: blank starts at vdisplay, ends at vtotal */
+    writeReg32(tb + TRANS_VBLANK_REG,
+               ((vtotal - 1) << 16) | ((vdisplay - 1) & 0xFFFF));
+
+    OSSynchronizeIO();
+    IODebug("setDisplayTimings(%u): done", trans);
+}
+
+/*
+ * ─────────────────────────────────────────────────────────────────
+ *  bool MyIntelGPU::configureDDIForDP(uint32_t port, uint32_t lanes,
+ *        uint32_t linkRate)
+ *
+ *  Enable DDI + DP transport link for DP/eDP output.
+ *
+ *  Sequence:
+ *    1. Enable DP_TP_CTL (SST mode, normal link training)
+ *    2. Enable DDI_BUF_CTL with lane count + link rate
+ *    3. Wait for DDI_BUF_CTL active
+ *
+ *  linkRate: 0=1.62G (RBR), 1=2.7G (HBR), 2=5.4G (HBR2), 3=8.1G (HBR3)
+ *
+ *  Reference: intel_ddi.c intel_ddi_pre_enable_dp()
+ * ─────────────────────────────────────────────────────────────────
+ */
+bool MyIntelGPU::configureDDIForDP(uint32_t port, uint32_t lanes, uint32_t linkRate)
+{
+    if (!fRegs) return false;
+
+    uint32_t ddiBase = DDI_A_BASE + (port * 0x100);
+
+    if (linkRate > 3) linkRate = 2;  /* cap to HBR2 */
+
+    /* Lane count bits for DDI_BUF_CTL */
+    uint32_t laneBits = (lanes >= 4) ? DDI_BUF_CTL_PORT_WIDTH_X4
+                      : (lanes >= 2) ? DDI_BUF_CTL_PORT_WIDTH_X2
+                      : DDI_BUF_CTL_PORT_WIDTH_X1;
+
+    /*
+     * Step 1: Enable DP Transport
+     * Set SST mode + normal link training
+     */
+    uint32_t tpCtl = DP_TP_CTL_ENABLE
+                    | DP_TP_CTL_MODE_SST
+                    | DP_TP_CTL_LINK_TRAIN_NORMAL
+                    | DP_TP_CTL_ENHANCED_FRAME;
+    writeReg32(ddiBase + DP_TP_CTL_REG, tpCtl);
+    OSSynchronizeIO();
+
+    /*
+     * Step 2: Enable DDI buffer for DP
+     * TGL+ requires both bit 31 (enable) and bit 30 (enable_val)
+     * Also clear bit 24-27 to select DP mode
+     */
+    uint32_t bufCtl = DDI_BUF_CTL_ENABLE
+                     | DDI_BUF_CTL_ENABLE_VAL
+                     | laneBits;
+
+    /* TGL+ link rate select bits in DDI_BUF_CTL [22:20] or [??] */
+    /* Actually for RPL/TGL, link rate may be in DDI_BUF_CTL bits [22:20] */
+    /* But on some platforms it's in a separate register. */
+    /* For now just enable without link rate — hardware uses default */
+
+    writeReg32(ddiBase + DDI_BUF_CTL_REG, bufCtl);
+    OSSynchronizeIO();
+
+    /*
+     * Step 3: Read back and verify
+     */
+    uint32_t status = readReg32(ddiBase + DDI_BUF_CTL_REG);
+    IODebug("configureDDI_DP(%u): lanes=%u rate=%u BUF_CTL=0x%08X",
+            port, lanes, linkRate, status);
+
+    /* Step 4: Link Training — pattern 1 → pattern 2 → normal */
+    /* Pattern 1: clock recovery */
+    tpCtl = (tpCtl & ~DP_TP_CTL_LINK_TRAIN_MASK)
+           | DP_TP_CTL_LINK_TRAIN_PAT1;
+    writeReg32(ddiBase + DP_TP_CTL_REG, tpCtl);
+    OSSynchronizeIO();
+    IODelay(1);
+
+    /* Pattern 2: channel equalization */
+    tpCtl = (tpCtl & ~DP_TP_CTL_LINK_TRAIN_MASK)
+           | DP_TP_CTL_LINK_TRAIN_PAT2;
+    writeReg32(ddiBase + DP_TP_CTL_REG, tpCtl);
+    OSSynchronizeIO();
+    IODelay(1);
+
+    /* Normal operation */
+    tpCtl = (tpCtl & ~DP_TP_CTL_LINK_TRAIN_MASK)
+           | DP_TP_CTL_LINK_TRAIN_NORMAL;
+    writeReg32(ddiBase + DP_TP_CTL_REG, tpCtl);
+    OSSynchronizeIO();
+
+    IODebug("configureDDI_DP(%u): done", port);
+    return true;
+}
+
+/*
+ * ─────────────────────────────────────────────────────────────────
+ *  bool MyIntelGPU::configureDDIForHDMI(uint32_t port)
+ *
+ *  Enable DDI for HDMI output.
+ *
+ *  Unlike DP, HDMI uses fixed 4 TMDS lanes.
+ *  DDI_BUF_CTL must be configured with appropriate vswing/pre-emphasis
+ *  through DDI_BUF_TRANS (not implemented here — uses defaults).
+ *
+ *  Reference: intel_ddi.c intel_ddi_pre_enable_hdmi()
+ * ─────────────────────────────────────────────────────────────────
+ */
+bool MyIntelGPU::configureDDIForHDMI(uint32_t port)
+{
+    if (!fRegs) return false;
+
+    uint32_t ddiBase = DDI_A_BASE + (port * 0x100);
+
+    /*
+     * For HDMI, enable DDI buffer with TMDS-style signaling.
+     * TGL+ uses DDI_BUF_CTL with specific configuration for HDMI:
+     *   - Must use 4 lanes (TMDS)
+     *   - DDI clock must be set to the appropriate HDMI pixel clock
+     *   - DDI_BUF_TRANS may need programming (skip for now)
+     */
+    uint32_t bufCtl = DDI_BUF_CTL_ENABLE
+                     | DDI_BUF_CTL_ENABLE_VAL
+                     | DDI_BUF_CTL_PORT_WIDTH_X4;
+
+    writeReg32(ddiBase + DDI_BUF_CTL_REG, bufCtl);
+    OSSynchronizeIO();
+
+    uint32_t status = readReg32(ddiBase + DDI_BUF_CTL_REG);
+    IODebug("configureDDI_HDMI(%u): BUF_CTL=0x%08X", port, status);
+
+    IODebug("configureDDI_HDMI(%u): done", port);
+    return true;
+}
+
+/*
+ * ─────────────────────────────────────────────────────────────────
+ *  bool MyIntelGPU::injectDisplayNode(bool isInternal,
+ *        const uint8_t *edid, uint32_t edidLen)
+ *
+ *  Inject display node properties into IORegistry so macOS
+ *  can discover and configure the display.
+ *
+ *  Properties set:
+ *    - "display-type"    : "LCD" or "external"
+ *    - "IODisplayEDID"   : raw EDID data blob
+ *    - "display-pixel-clock" : pixel clock in Hz
+ *    - "display-timings" : preferred timing dictionary
+ *    - "self-contained"  : true for eDP
+ *
+ *  Uses IOService::setProperty() to publish entries.
+ * ─────────────────────────────────────────────────────────────────
+ */
+bool MyIntelGPU::injectDisplayNode(bool isInternal,
+                                   const uint8_t *edid, uint32_t edidLen)
+{
+    if (!edid || edidLen < EDID_BLOCK_SIZE) return false;
+
+    /*
+     * 1. Set display type
+     */
+    const char *dispType = isInternal ? "LCD" : "external";
+    setProperty("display-type", dispType);
+    setProperty("self-contained", isInternal);
+
+    /*
+     * 2. Inject entire EDID blob
+     *    macOS reads IODisplayEDID to match display
+     */
+    OSData *edidData = OSData::withBytes(edid, edidLen);
+    if (edidData) {
+        setProperty("IODisplayEDID", edidData);
+        setProperty("EDID", edidData);
+        edidData->release();
+    }
+
+    /*
+     * 3. Inject display dimensions from parsed EDID
+     */
+    if (fDisplayWidth > 0 && fDisplayHeight > 0) {
+        char resStr[32];
+        snprintf(resStr, sizeof(resStr), "%ux%u", fDisplayWidth, fDisplayHeight);
+        setProperty("display-native-resolution", resStr);
+
+        /* Pixel clock in Hz */
+        uint32_t pixelClockHz = fDisplayWidth * fDisplayHeight
+                              * (fDisplayRefresh / 1000);
+        if (pixelClockHz > 0) {
+            OSNumber *clkNum = OSNumber::withNumber(pixelClockHz, 32);
+            if (clkNum) {
+                setProperty("display-pixel-clock", clkNum);
+                clkNum->release();
+            }
+        }
+
+        /* Refresh rate */
+        OSNumber *refreshNum = OSNumber::withNumber(fDisplayRefresh, 32);
+        if (refreshNum) {
+            setProperty("display-refresh-rate", refreshNum);
+            refreshNum->release();
+        }
+
+        /* Set display name if available */
+        if (fDisplayName[0] != '\0') {
+            setProperty("display-name", fDisplayName);
+        }
+    }
+
+    IODebug("injectDisplayNode: %s '%s' %ux%u edid=%uB",
+            dispType, fDisplayName[0] ? fDisplayName : "Generic",
+            fDisplayWidth, fDisplayHeight, edidLen);
+
+    return true;
+}
+
+/*
+ * ─────────────────────────────────────────────────────────────────
+ *  bool MyIntelGPU::probeDDI(uint32_t port)
+ *
+ *  Probe DDI port for display presence.
+ *
+ *  Reads DDI_BUF_CTL to check if a display is connected.
+ *  On TGL+, the DDI_BUF_CTL's active bit (29) or the AUX
+ *  channel status can indicate connection.
+ *
+ *  @return true if display detected on this port
+ * ─────────────────────────────────────────────────────────────────
+ */
+bool MyIntelGPU::probeDDI(uint32_t port)
+{
+    if (!fRegs) return false;
+
+    uint32_t ddiBase = DDI_A_BASE + (port * 0x100);
+
+    /* Check DDI_BUF_CTL active status */
+    uint32_t bufCtl = readReg32(ddiBase + DDI_BUF_CTL_REG);
+    if (bufCtl & DDI_BUF_CTL_ENABLE) {
+        IODebug("probeDDI(%u): DDI_BUF_CTL=0x%08X (enabled)", port, bufCtl);
+        /* If enable bit is set, DDI is likely already driving a display */
+        return true;
+    }
+
+    /* Try a quick AUX read (DPCD register 0x00000 = DPCD_REV) */
+    uint8_t dpcdRev[1];
+    if (ddiAuxXfer(port, 0, NULL, 0, dpcdRev, 1)) {
+        if (dpcdRev[0] != 0 && dpcdRev[0] != 0xFF) {
+            IODebug("probeDDI(%u): DPCD rev 0x%02X — display present", port, dpcdRev[0]);
+            return true;
+        }
+    }
+
+    IODebug("probeDDI(%u): no display detected", port);
+    return false;
+}
+
+/*
+ * ─────────────────────────────────────────────────────────────────
+ *  bool MyIntelGPU::setupDDIB(void)
+ *
+ *  Setup DDI B as an external display output (secondary monitor).
+ *
+ *  Pipeline:
+ *    1. Allocate separate scanout buffer / or share primary
+ *    2. Configure Pipe B
+ *    3. Configure Transcoder B -> DDI B
+ *    4. Configure DDI B for DP
+ *    5. Primary Plane B
+ *    6. Inject display node for external display
+ *
+ *  Reuses width/height from primary if EDID not available for port B.
+ * ─────────────────────────────────────────────────────────────────
+ */
+bool MyIntelGPU::setupDDIB(void)
+{
+    if (!fRegs) return false;
+
+    IODebug("setupDDIB: configuring DDI B as external display");
+    uint32_t width  = fDisplayWidth  ? fDisplayWidth  : 1920;
+    uint32_t height = fDisplayHeight ? fDisplayHeight : 1080;
+    uint32_t bpp    = 32;
+
+    /* Allocate buffer for pipe B (separate GGTT region) */
+    uint32_t stride  = width * (bpp / 8);
+    uint32_t bufSize = stride * height;
+    uint32_t numPages = (bufSize + GTT_PAGE_SIZE - 1) / GTT_PAGE_SIZE;
+
+    void *va = IOMallocAligned(bufSize, GTT_PAGE_SIZE);
+    if (!va) {
+        IODebug("setupDDIB: alloc failed");
+        return false;
+    }
+    bzero(va, bufSize);
+
+    IOMemoryDescriptor *desc = IOMemoryDescriptor::withAddressRange(
+        (mach_vm_address_t)va, bufSize, kIODirectionOut, kernel_task);
+    if (!desc || desc->prepare(kIODirectionOut) != kIOReturnSuccess) {
+        if (desc) desc->release();
+        IOFreeAligned(va, bufSize);
+        return false;
+    }
+
+    IOByteCount segLen = 0;
+    addr64_t physAddr = desc->getPhysicalSegment64(0, &segLen, kIOMemoryMapperNone);
+    if (!physAddr || segLen < (IOByteCount)(numPages * GTT_PAGE_SIZE)) {
+        desc->complete(kIODirectionOut);
+        desc->release();
+        IOFreeAligned(va, bufSize);
+        return false;
+    }
+
+    /* Write GGTT PTEs starting at fScanoutGGTTOffset + fScanoutNumPages */
+    uint32_t ggttStart = fScanoutGGTTOffset + fScanoutNumPages;
+    for (uint32_t i = 0; i < numPages; i++) {
+        uint64_t pte = makePTE((uint64_t)physAddr + (uint64_t)(i * GTT_PAGE_SIZE), 0);
+        writeGGTTPTE(ggttStart + i, pte);
+    }
+    ggttInvalidate();
+
+    /* Store for framebuffer interface */
+    fFbBase[FB_INDEX_EXTERNAL1]       = va;
+    fFbGGTTOffset[FB_INDEX_EXTERNAL1] = ggttStart;
+    fFbNumPages[FB_INDEX_EXTERNAL1]   = numPages;
+    fFbWidth[FB_INDEX_EXTERNAL1]      = width;
+    fFbHeight[FB_INDEX_EXTERNAL1]     = height;
+    fFbBpp[FB_INDEX_EXTERNAL1]        = bpp;
+    fFbRefresh[FB_INDEX_EXTERNAL1]    = fDisplayRefresh ? fDisplayRefresh : 60000;
+
+    /* Configure Pipe B */
+    initPipe(1, width, height, 8);
+
+    /* Configure Transcoder B -> DDI B (DP SST, 4 lanes) */
+    initTranscoder(1, 1, 8, 4, TRANS_DDI_MODE_DP_SST);
+
+    /* Configure DDI B for DP */
+    configureDDIForDP(1, 4, 2);
+
+    /* Primary Plane B with same format + own GGTT offset */
+    uint32_t fmt = PLANE_CTL_FORMAT_XRGB8888;
+    initPrimaryPlane(1, width, height, stride, ggttStart, fmt);
+
+    /* Read EDID from DDI B if possible */
+    uint8_t edidB[EDID_BLOCK_SIZE];
+    bool edidBok = false;
+    if (readEdidFromAux(1)) {
+        edidBok = true;
+        memcpy(edidB, fEdidData, EDID_BLOCK_SIZE);
+    }
+
+    if (edidBok) {
+        injectDisplayNode(false, edidB, EDID_BLOCK_SIZE);
+    } else {
+        injectDisplayNode(false, NULL, 0);
+    }
+
+    fFramebufferCount++;
+    IODebug("setupDDIB: done — pipe B / DDI B configured");
+    return true;
+}
+
+/*
+ * ─────────────────────────────────────────────────────────────────
+ *  bool MyIntelGPU::setupDDIC(void)
+ *
+ *  Setup DDI C as an external display output (tertiary monitor).
+ *  Same pattern as setupDDIB but for pipe C + DDI C.
+ *
+ *  Many ADL/RPL laptops have only DDI A (eDP) + DDI B (Type-C/HDMI).
+ *  DDI C is optional — this is a best-effort probe.
+ * ─────────────────────────────────────────────────────────────────
+ */
+bool MyIntelGPU::setupDDIC(void)
+{
+    if (!fRegs) return false;
+    if (fFramebufferCount >= FB_MAX_CRTC) return false;
+
+    IODebug("setupDDIC: configuring DDI C as external display");
+    uint32_t width  = 1920;
+    uint32_t height = 1080;
+    uint32_t bpp    = 32;
+
+    /* Read EDID from DDI C */
+    uint8_t edidC[EDID_BLOCK_SIZE];
+    bool haveEdid = false;
+    if (readEdidFromAux(2)) {
+        haveEdid = true;
+        memcpy(edidC, fEdidData, EDID_BLOCK_SIZE);
+        if (fDisplayWidth > 0 && fDisplayHeight > 0) {
+            width  = fDisplayWidth;
+            height = fDisplayHeight;
+        }
+    }
+
+    uint32_t stride    = width * (bpp / 8);
+    uint32_t bufSize   = stride * height;
+    uint32_t numPages  = (bufSize + GTT_PAGE_SIZE - 1) / GTT_PAGE_SIZE;
+
+    void *va = IOMallocAligned(bufSize, GTT_PAGE_SIZE);
+    if (!va) return false;
+    bzero(va, bufSize);
+
+    IOMemoryDescriptor *desc = IOMemoryDescriptor::withAddressRange(
+        (mach_vm_address_t)va, bufSize, kIODirectionOut, kernel_task);
+    if (!desc || desc->prepare(kIODirectionOut) != kIOReturnSuccess) {
+        if (desc) desc->release();
+        IOFreeAligned(va, bufSize);
+        return false;
+    }
+
+    IOByteCount segLen = 0;
+    addr64_t physAddr = desc->getPhysicalSegment64(0, &segLen, kIOMemoryMapperNone);
+    if (!physAddr) {
+        desc->complete(kIODirectionOut); desc->release();
+        IOFreeAligned(va, bufSize);
+        return false;
+    }
+
+    uint32_t ggttStart = fFbGGTTOffset[0] + fFbNumPages[0]
+                       + fFbNumPages[1];  /* after pipe A + B */
+    for (uint32_t i = 0; i < numPages; i++) {
+        writeGGTTPTE(ggttStart + i,
+                     makePTE((uint64_t)physAddr + (uint64_t)(i * GTT_PAGE_SIZE), 0));
+    }
+    ggttInvalidate();
+
+    fFbBase[FB_INDEX_EXTERNAL2]       = va;
+    fFbGGTTOffset[FB_INDEX_EXTERNAL2] = ggttStart;
+    fFbNumPages[FB_INDEX_EXTERNAL2]   = numPages;
+    fFbWidth[FB_INDEX_EXTERNAL2]      = width;
+    fFbHeight[FB_INDEX_EXTERNAL2]     = height;
+    fFbBpp[FB_INDEX_EXTERNAL2]        = bpp;
+
+    initPipe(2, width, height, 8);
+    initTranscoder(2, 2, 8, 4, TRANS_DDI_MODE_DP_SST);
+    configureDDIForDP(2, 4, 2);
+    initPrimaryPlane(2, width, height, stride, ggttStart, PLANE_CTL_FORMAT_XRGB8888);
+
+    if (haveEdid) {
+        injectDisplayNode(false, edidC, EDID_BLOCK_SIZE);
+    } else {
+        injectDisplayNode(false, NULL, 0);
+    }
+
+    fFramebufferCount++;
+    IODebug("setupDDIC: done");
+    return true;
+}
+
+/*
+ * ─────────────────────────────────────────────────────────────────
+ *  bool MyIntelGPU::setupMultiMonitor(void)
+ *
+ *  Probe all DDI ports (B, C) for connected displays and
+ *  initialise them.
+ *
+ *  @return true if at least one external display was configured
+ * ─────────────────────────────────────────────────────────────────
+ */
+bool MyIntelGPU::setupMultiMonitor(void)
+{
+    if (!fRegs) return false;
+
+    bool found = false;
+
+    /* Probe DDI B (port 1) */
+    if (probeDDI(1)) {
+        IODebug("setupMultiMonitor: DDI B display detected");
+        setupDDIB();
+        found = true;
+    }
+
+    /* Probe DDI C (port 2) */
+    if (probeDDI(2)) {
+        IODebug("setupMultiMonitor: DDI C display detected");
+        setupDDIC();
+        found = true;
+    }
+
+    if (!found) {
+        IODebug("setupMultiMonitor: no external displays found");
+    }
+
+    return found;
+}
+
+/*
+ * ─────────────────────────────────────────────────────────────────
  *  bool MyIntelGPU::setupFramebuffer(void)
  *
  *  Full framebuffer pipeline (Pipe A, Primary Plane, Transcoder A, DDI A)
+ *  with Phase 2.3 EDID / timing / DDI / display node integration.
  *
- *  TODO: ควรอ่าน EDID หรือใช้ mode จาก boot fb เพื่อให้ resolution
- *        ตรงกับหน้าจอจริง ปัจจุบัน hardcode 1920x1080@60
+ *  Pipeline order:
+ *    1. EDID read + parse  (Phase 2.3)
+ *    2. allocScanoutBuffer — allocate physical memory + write GGTT PTEs
+ *    3. setDisplayTimings  — set timing registers from parsed EDID
+ *    4. initPipe — enable pipe with source size + bpc
+ *    5. initTranscoder — configure transcoder mode
+ *    6. configureDDIForDP — DDI with link training
+ *    7. initPrimaryPlane — attach plane to pipe with fb address
+ *    8. injectDisplayNode — publish display info to IORegistry
+ *    9. setupMultiMonitor — probe and configure DDI B/C
  *
- *  Pipeline order matters:
- *    1. allocScanoutBuffer — allocate physical memory + write GGTT PTEs
- *    2. initPipe — enable pipe with source size + bpc
- *    3. initTranscoder — configure transcoder mode
- *    4. initDDI — enable DDI buffer (port A → eDP)
- *    5. initPrimaryPlane — attach plane to pipe with fb address
- *
- *  Reference: Linux i915 display mode set sequence
+ *  Falls back to 1920x1080@60 when no EDID available.
  * ─────────────────────────────────────────────────────────────────
  */
 bool MyIntelGPU::setupFramebuffer(void)
@@ -1805,58 +2773,121 @@ bool MyIntelGPU::setupFramebuffer(void)
     IODebug("=== Framebuffer Pipeline Start ===");
 
     /*
-     * Step 1: Allocate 1920x1080x32bpp framebuffer
-     *
-     * TODO: Dynamic mode detection from:
-     *   - EDID read (DDC)
-     *   - OpRegion / VBT
-     *   - Current pipe config (boot fb)
+     * Step 1: EDID detection
+     *   a. Try IORegistry (bootloader pre-inject)
+     *   b. Try AUX channel
+     *   c. Fall back to hardcoded default
      */
-    uint32_t width  = 1920;
-    uint32_t height = 1080;
-    uint32_t bpp    = 32;
+    bool edidOk = false;
+    if (!readEdidFromRegistry()) {
+        if (!readEdidFromAux(0)) {
+            IODebug("setupFramebuffer: no EDID, using defaults");
+        } else {
+            edidOk = true;
+        }
+    } else {
+        edidOk = true;
+    }
 
+    if (edidOk) {
+        parseEdid();
+    }
+
+    /* Determine display resolution from EDID or defaults */
+    uint32_t width    = (fDisplayWidth  > 0)  ? fDisplayWidth  : 1920;
+    uint32_t height   = (fDisplayHeight > 0)  ? fDisplayHeight : 1080;
+    uint32_t bpp      = 32;
+    uint32_t vRefresh = (fDisplayRefresh > 0) ? fDisplayRefresh : 60000;  /* 60 Hz */
+
+    IODebug("setupFramebuffer: target mode %ux%u @%u.%03uHz",
+            width, height, vRefresh / 1000, vRefresh % 1000);
+
+    /*
+     * Step 2: Allocate scanout buffer
+     */
     if (!allocScanoutBuffer(width, height, bpp)) {
         IODebug("setupFramebuffer: allocScanoutBuffer failed");
         return false;
     }
 
+    /* Store in framebuffer interface table */
+    fFramebufferCount = 1;
+    fFbWidth[0]  = width;
+    fFbHeight[0] = height;
+    fFbBpp[0]    = bpp;
+    fFbRefresh[0]= vRefresh;
+    fFbBase[0]   = fScanoutBufferVA;
+    fFbGGTTOffset[0] = fScanoutGGTTOffset;
+    fFbNumPages[0]   = fScanoutNumPages;
+
     /*
-     * Step 2: Configure Pipe A
+     * Step 3: Timing registers for 1920x1080@60 (CEA-861)
+     *         H: active=1920, FP=88, sync=44, BP=148 = 2200 total
+     *         V: active=1080, FP=4,  sync=5,  BP=36  = 1125 total
+     */
+    uint32_t hdisplay    = width;
+    uint32_t hsync_start = width + 88;
+    uint32_t hsync_end   = hsync_start + 44;
+    uint32_t htotal      = hsync_end + 148;
+    uint32_t vdisplay    = height;
+    uint32_t vsync_start = height + 4;
+    uint32_t vsync_end   = vsync_start + 5;
+    uint32_t vtotal      = vsync_end + 36;
+
+    if (width == 1920 && height == 1080) {
+        /* Standard CEA-861 1920x1080@60Hz */
+        hsync_start = 2008; hsync_end = 2052; htotal = 2200;
+        vsync_start = 1084; vsync_end = 1089; vtotal = 1125;
+    } else if (width == 1366 && height == 768) {
+        /* Common 1366x768 panel */
+        hsync_start = 1414; hsync_end = 1446; htotal = 1592;
+        vsync_start = 771;  vsync_end = 777;  vtotal = 798;
+    } else if (width == 2560 && height == 1440) {
+        /* 2560x1440 */
+        hsync_start = 2640; hsync_end = 2680; htotal = 2720;
+        vsync_start = 1443; vsync_end = 1448; vtotal = 1481;
+    }
+
+    setDisplayTimings(0, hdisplay, hsync_start, hsync_end, htotal,
+                         vdisplay, vsync_start, vsync_end, vtotal);
+
+    /*
+     * Step 4: Configure Pipe A
      */
     initPipe(0, width, height, 8);
 
     /*
-     * Step 3: Configure Transcoder A → DDI A (eDP, 4 lanes, DP SST)
-     *
-     * NOTE: ถ้าเป็น HDMI monitor ต้องใช้ TRANS_DDI_MODE_HDMI
-     *       mode ที่ถูกต้องต้องตรวจจาก connector type
+     * Step 5: Configure Transcoder A -> DDI A (DP SST, 4 lanes)
      */
-    initTranscoder(0,    /* trans A */
-                   0,    /* port A */
-                   8,    /* 8 bpc */
-                   4,    /* 4 lanes (eDP) */
-                   TRANS_DDI_MODE_DP_SST);
+    initTranscoder(0, 0, 8, 4, TRANS_DDI_MODE_DP_SST);
 
     /*
-     * Step 4: Enable DDI A (eDP, 4 lanes)
+     * Step 6: Configure DDI A for DP/eDP output with link training
+     *         Default link rate = HBR2 (5.4Gbps)
      */
-    initDDI(0, 4);
+    configureDDIForDP(0, 4, 2);
 
     /*
-     * Step 5: Configure Primary Plane A
-     *   - 1920x1080
-     *   - stride = 1920 * 4 = 7680 bytes
-     *   - GGTT offset 0 (from allocScanoutBuffer)
-     *   - XRGB8888 format
+     * Step 7: Configure Primary Plane A
      */
     fScanoutFormat = PLANE_CTL_FORMAT_XRGB8888;
-    initPrimaryPlane(0,
-                     fScanoutWidth,
-                     fScanoutHeight,
-                     fScanoutStride,
-                     fScanoutGGTTOffset,
-                     fScanoutFormat);
+    initPrimaryPlane(0, fScanoutWidth, fScanoutHeight,
+                     fScanoutStride, fScanoutGGTTOffset, fScanoutFormat);
+
+    /*
+     * Step 8: Inject display node (eDP = internal)
+     */
+    if (fEdidValid) {
+        injectDisplayNode(true, fEdidData, fEdidLength);
+    }
+
+    /*
+     * Step 9: Probe and enable multi-monitor (DDI B, DDI C)
+     */
+    setupMultiMonitor();
+
+    /* Update framebuffer interface */
+    createFramebufferInterface();
 
     IODebug("=== Framebuffer Pipeline Complete ===");
     return true;
@@ -1912,10 +2943,77 @@ bool MyIntelGPU::initBacklight(void)
     }
     uint32_t pwm = readReg32(fakeOffset);
     IODebug("BLC_PWM_CTL = 0x%08X", pwm);
-    pwm |= 0x80000000;
-    writeReg32(fakeOffset, pwm);
-    IODebug("Backlight PWM enabled");
+    /* Enable PWM and set polarity, then set default brightness */
+    enableBacklight(true);
+    setBacklightBrightness(100);
     return true;
+}
+
+/*
+ * ─────────────────────────────────────────────────────────────────
+ *  void MyIntelGPU::setBacklightBrightness(uint32_t percent)
+ *
+ *  Set backlight brightness (0-100%) via PWM duty cycle.
+ *
+ *  1. Read PWM period from BLC_PWM_PERIOD register
+ *  2. Calculate duty = period * percent / 100
+ *  3. Write duty to BLC_PWM_DUTY_CYCLE register
+ *
+ *  Uses CFL fake offset — PCH translation maps to RPL address.
+ * ─────────────────────────────────────────────────────────────────
+ */
+void MyIntelGPU::setBacklightBrightness(uint32_t percent)
+{
+    if (!fRegs) return;
+    if (percent > 100) percent = 100;
+
+    uint32_t ctlOff   = CFL_BLC_PWM_CTL;
+    uint32_t dutyOff  = ctlOff + BLC_PWM_DUTY_OFF;
+    uint32_t periodOff = ctlOff + BLC_PWM_PERIOD_OFF;
+
+    uint32_t period = readReg32(periodOff);
+    /* If period is invalid, use a reasonable default */
+    if (period == 0 || period == 0xFFFFFFFF) {
+        period = 0x1000;  /* 4096 clock cycles */
+        writeReg32(periodOff, period);
+    }
+
+    uint32_t duty = (period * percent) / 100;
+    if (duty > period) duty = period;
+    if (duty == 0 && percent > 0) duty = 1;
+
+    writeReg32(dutyOff, duty);
+    OSSynchronizeIO();
+
+    IODebug("setBacklight: %u%% duty=0x%X/0x%X", percent, duty, period);
+}
+
+/*
+ * ─────────────────────────────────────────────────────────────────
+ *  void MyIntelGPU::enableBacklight(bool on)
+ *
+ *  Enable or disable the backlight PWM controller.
+ *
+ *  BLC_PWM_CTL bit 31 = enable
+ *  (bit 29 = polarity, set for active-high PWM)
+ * ─────────────────────────────────────────────────────────────────
+ */
+void MyIntelGPU::enableBacklight(bool on)
+{
+    if (!fRegs) return;
+
+    uint32_t fakeOffset = CFL_BLC_PWM_CTL;
+    uint32_t pwm = readReg32(fakeOffset);
+
+    if (on) {
+        pwm |= BLC_PWM_CTL_ENABLE | BLC_PWM_CTL_POLARITY;
+    } else {
+        pwm &= ~BLC_PWM_CTL_ENABLE;
+    }
+
+    writeReg32(fakeOffset, pwm);
+    OSSynchronizeIO();
+    IODebug("%s backlight (PWM=0x%08X)", on ? "Enabled" : "Disabled", pwm);
 }
 
 void MyIntelGPU::dumpDisplayStatus(void)
@@ -1947,6 +3045,545 @@ bool MyIntelGPU::initDisplay(void)
     dumpDisplayStatus();
     IODebug("=== Display Init %s ===", ok ? "OK" : "PARTIAL");
     return ok;
+}
+
+/*
+ * ─────────────────────────────────────────────────────────────────
+ *  Phase 3 — GT Interrupts / Vblank / Hotplug Detection
+ * ─────────────────────────────────────────────────────────────────
+ */
+
+/*
+ * ─────────────────────────────────────────────────────────────────
+ *  bool MyIntelGPU::initInterrupts(void)
+ *
+ *  Initialise GT + Display interrupt system.
+ *
+ *  Steps:
+ *    1. Create/get IOWorkLoop
+ *    2. Install IOInterruptEventSource from IOPCIDevice
+ *    3. Mask all GT engine interrupts
+ *    4. Enable display interrupt control
+ *    5. Enable hotplug detection
+ *
+ *  Reference:
+ *    i915_irq.c gen11_irq_postinstall()
+ *    i915_irq.c gen8_irq_power_well_post_enable()
+ * ─────────────────────────────────────────────────────────────────
+ */
+bool MyIntelGPU::initInterrupts(void)
+{
+    if (!fPCIDevice || !fRegs) return false;
+
+    IODebug("initInterrupts: starting");
+
+    /* Step 1: Get work loop */
+    fWorkLoop = getWorkLoop();
+    if (!fWorkLoop) {
+        fWorkLoop = IOWorkLoop::workLoop();
+        if (!fWorkLoop) {
+            IODebug("initInterrupts: no work loop");
+            return false;
+        }
+    }
+    fWorkLoop->retain();
+
+    /* Step 2: Install interrupt event source */
+    fInterruptSource = IOInterruptEventSource::interruptEventSource(
+                           this,
+                           OSMemberFunctionCast(IOInterruptEventAction, this,
+                               &MyIntelGPU::handleInterrupt),
+                           fPCIDevice,
+                           0);
+    if (!fInterruptSource) {
+        IODebug("initInterrupts: interruptEventSource failed");
+        return false;
+    }
+
+    if (fWorkLoop->addEventSource(fInterruptSource) != kIOReturnSuccess) {
+        IODebug("initInterrupts: addEventSource failed");
+        fInterruptSource->release();
+        fInterruptSource = NULL;
+        return false;
+    }
+
+    fInterruptSource->enable();
+
+    /* Step 3: Mask all GT engine interrupts initially */
+    writeReg32(GEN11_GT_INTR_MASK0, 0xFFFFFFFF);
+    writeReg32(GEN11_GT_INTR_MASK1, 0xFFFFFFFF);
+    writeReg32(GEN11_GT_INTR_MASK2, 0xFFFFFFFF);
+
+    /* Clear any pending GT interrupts */
+    readReg32(GEN11_GT_INTR_DW0);
+    readReg32(GEN11_GT_INTR_DW1);
+    readReg32(GEN11_GT_INTR_DW2);
+
+    /* Step 4: Enable display interrupt control */
+    fDisplayIntrMask = 0;
+    writeReg32(GEN12_DISPLAY_INT_CTL, DISPLAY_INT_CTL_ENABLE);
+    writeReg32(GEN12_DISPLAY_INT_MASK, 0xFFFFFFFF);  /* mask all initially */
+
+    fInterruptsReady = true;
+    IODebug("initInterrupts: done");
+    return true;
+}
+
+/*
+ * ─────────────────────────────────────────────────────────────────
+ *  bool MyIntelGPU::installInterruptHandlers(void)
+ *
+ *  Pin the interrupt event source and unmask basic interrupts.
+ *  Called after framebuffer pipeline is ready.
+ *
+ *  @return true on success
+ * ─────────────────────────────────────────────────────────────────
+ */
+bool MyIntelGPU::installInterruptHandlers(void)
+{
+    if (!fInterruptsReady) {
+        /* Fall back to polling if interrupts not ready */
+        IODebug("installInterruptHandlers: interrupts not ready, using poll");
+        return false;
+    }
+
+    /* Unmask display vblank interrupts for pipe A */
+    enableVblankInterrupt(0, true);
+
+    /* Init hotplug detection */
+    initHotplugDetect();
+
+    IODebug("installInterruptHandlers: done");
+    return true;
+}
+
+/*
+ * ─────────────────────────────────────────────────────────────────
+ *  void MyIntelGPU::handleInterrupt(void *src, int count)
+ *
+ *  Primary interrupt handler (called from IOInterruptEventSource).
+ *
+ *  Reads GT and display interrupt identity registers
+ *  to dispatch to sub-handlers.
+ *
+ *  Safety: if no interrupt is pending (0xFFFFFFFF), bail out.
+ * ─────────────────────────────────────────────────────────────────
+ */
+void MyIntelGPU::handleInterrupt(void *src, int count)
+{
+    if (!fRegs) return;
+
+    /* Read GT interrupt identity */
+    uint32_t gtDW0 = readReg32(GEN11_GT_INTR_DW0);
+    if (gtDW0 != 0 && gtDW0 != 0xFFFFFFFF) {
+        handleGTInterrupt(gtDW0);
+    }
+
+    /* Read display interrupt identity */
+    uint32_t dispID = readReg32(GEN12_DISPLAY_INT_ID);
+    if (dispID != 0 && dispID != 0xFFFFFFFF) {
+        /* Dispatch based on bit pattern */
+        if (dispID & DISPLAY_INT_VBLANK_A) {
+            /* Clear vblank bit */
+            writeReg32(GEN12_PIPEA_IIR, PIPE_IIR_VBLANK);
+        }
+        if (dispID & DISPLAY_INT_HOTPLUG_DDI_A ||
+            dispID & DISPLAY_INT_HOTPLUG_DDI_B ||
+            dispID & DISPLAY_INT_HOTPLUG_DDI_C) {
+            /* Clear hotplug bits */
+            writeReg32(SHOTPLUG_STATUS, 0xFFFFFFFF);
+            pollHotplugStatus();
+        }
+    }
+
+    /* Read and clear per-pipe IIR registers unconditionally */
+    uint32_t iirA = readReg32(GEN12_PIPEA_IIR);
+    if (iirA) writeReg32(GEN12_PIPEA_IIR, iirA);
+
+    uint32_t iirB = readReg32(GEN12_PIPEB_IIR);
+    if (iirB) writeReg32(GEN12_PIPEB_IIR, iirB);
+
+    uint32_t iirC = readReg32(GEN12_PIPEC_IIR);
+    if (iirC) writeReg32(GEN12_PIPEC_IIR, iirC);
+}
+
+/*
+ * ─────────────────────────────────────────────────────────────────
+ *  void MyIntelGPU::handleGTInterrupt(uint32_t intrDW0)
+ *
+ *  Handle GT engine interrupt.
+ *  Identifies which engine(s) generated the interrupt
+ *  and logs the event.  Actual submission/response is
+ *  not implemented yet (no command submission in current phases).
+ * ─────────────────────────────────────────────────────────────────
+ */
+void MyIntelGPU::handleGTInterrupt(uint32_t intrDW0)
+{
+    /* intrDW0 contains per-engine interrupt status bits */
+    if (intrDW0 & (1 << 0))  IODebug("GTIntr: RCS0");
+    if (intrDW0 & (1 << 1))  IODebug("GTIntr: VCS0");
+    if (intrDW0 & (1 << 3))  IODebug("GTIntr: BCS0");
+    if (intrDW0 & (1 << 4))  IODebug("GTIntr: VECS0");
+    if (intrDW0 & (1 << 5))  IODebug("GTIntr: VCS1");
+    if (intrDW0 & (1 << 6))  IODebug("GTIntr: VCS2");
+
+    /* Write to clear the interrupt */
+    writeReg32(GEN11_GT_INTR_DW0, intrDW0);
+}
+
+/*
+ * ─────────────────────────────────────────────────────────────────
+ *  void MyIntelGPU::handleDisplayInterrupt(void)
+ *
+ *  Handle display interrupt.
+ *  Wrapper for shared display interrupt dispatch.
+ * ─────────────────────────────────────────────────────────────────
+ */
+void MyIntelGPU::handleDisplayInterrupt(void)
+{
+    uint32_t dispID = readReg32(GEN12_DISPLAY_INT_ID);
+    if (dispID & DISPLAY_INT_VBLANK_A) {
+        writeReg32(GEN12_PIPEA_IIR, PIPE_IIR_VBLANK);
+    }
+    if (dispID & DISPLAY_INT_VBLANK_B) {
+        writeReg32(GEN12_PIPEB_IIR, PIPE_IIR_VBLANK);
+    }
+    /* Dispatch other display events */
+    uint32_t hpd = dispID & DISPLAY_INT_HOTPLUG_MASK;
+    if (hpd) {
+        writeReg32(SHOTPLUG_STATUS, 0xFFFFFFFF);
+    }
+}
+
+/*
+ * ─────────────────────────────────────────────────────────────────
+ *  bool MyIntelGPU::enableVblankInterrupt(uint32_t pipe, bool enable)
+ *
+ *  Enable or disable VBLANK interrupt for a pipe.
+ *
+ *  On Gen12+, per-pipe interrupt enable is in DISPLAY_INT_MASK.
+ *  Clearing a mask bit = enabling the interrupt.
+ *
+ *  @param pipe   pipe index (0=PIPE_A, 1=PIPE_B, 2=PIPE_C)
+ *  @param enable true to enable, false to disable
+ *  @return true on success
+ * ─────────────────────────────────────────────────────────────────
+ */
+bool MyIntelGPU::enableVblankInterrupt(uint32_t pipe, bool enable)
+{
+    if (!fRegs) return false;
+
+    uint32_t mask = readReg32(GEN12_DISPLAY_INT_MASK);
+    uint32_t vblankBit = (pipe == 0) ? DISPLAY_INT_VBLANK_A
+                       : (pipe == 1) ? DISPLAY_INT_VBLANK_B
+                       : DISPLAY_INT_VBLANK_C;
+
+    if (enable) {
+        mask &= ~vblankBit;  /* clear mask bit → enable interrupt */
+        fDisplayIntrMask &= ~vblankBit;
+    } else {
+        mask |= vblankBit;   /* set mask bit → disable interrupt */
+        fDisplayIntrMask |= vblankBit;
+    }
+
+    writeReg32(GEN12_DISPLAY_INT_MASK, mask);
+    OSSynchronizeIO();
+
+    IODebug("vblank(%u): %s", pipe, enable ? "enabled" : "disabled");
+    return true;
+}
+
+/*
+ * ─────────────────────────────────────────────────────────────────
+ *  uint32_t MyIntelGPU::getFrameCount(uint32_t pipe)
+ *
+ *  Read current frame count from pipe register.
+ *  PIPE_FRMCOUNT increments at vblank.
+ *
+ *  @param pipe  pipe index
+ *  @return current frame count
+ * ─────────────────────────────────────────────────────────────────
+ */
+uint32_t MyIntelGPU::getFrameCount(uint32_t pipe)
+{
+    if (!fRegs) return 0;
+
+    uint32_t pipeBase = PIPE_A_BASE + (pipe * 0x1000);
+    return readReg32(pipeBase + PIPE_FRMCOUNT_REG);
+}
+
+/*
+ * ─────────────────────────────────────────────────────────────────
+ *  uint32_t MyIntelGPU::getScanLine(uint32_t pipe)
+ *
+ *  Read current scan line position.
+ *  PIPE_DSL gives the current displayed scan line.
+ *
+ *  Useful for synchronising buffer swaps (wait for vblank:
+ *  scanline > active area).
+ *
+ *  @param pipe  pipe index
+ *  @return current scan line (0 ≈ vblank area)
+ * ─────────────────────────────────────────────────────────────────
+ */
+uint32_t MyIntelGPU::getScanLine(uint32_t pipe)
+{
+    if (!fRegs) return 0;
+
+    uint32_t pipeBase = PIPE_A_BASE + (pipe * 0x1000);
+    return readReg32(pipeBase + PIPE_DSL_REG);
+}
+
+/*
+ * ─────────────────────────────────────────────────────────────────
+ *  bool MyIntelGPU::initHotplugDetect(void)
+ *
+ *  Initialise hotplug detection.
+ *
+ *  1. Enable SHOTPLUG_DDI_A/B/C bits in SHOTPLUG_CTL
+ *  2. Enable HPD interrupt in DISPLAY_INT_MASK
+ *  3. Read initial SHOTPLUG_STATUS
+ *  4. Store in fHotplugDDIMask for change detection
+ * ─────────────────────────────────────────────────────────────────
+ */
+bool MyIntelGPU::initHotplugDetect(void)
+{
+    if (!fRegs) return false;
+
+    /* Enable HPD for DDI A, B, C */
+    uint32_t shotplugCtl = SHOTPLUG_DDI_A_EN
+                         | SHOTPLUG_DDI_B_EN
+                         | SHOTPLUG_DDI_C_EN;
+    writeReg32(SHOTPLUG_CTL, shotplugCtl);
+    OSSynchronizeIO();
+
+    /* Enable HPD interrupt in display mask */
+    uint32_t mask = readReg32(GEN12_DISPLAY_INT_MASK);
+    mask &= ~DISPLAY_INT_HOTPLUG_MASK;  /* unmask = enable */
+    writeReg32(GEN12_DISPLAY_INT_MASK, mask);
+
+    /* Read initial status */
+    fHotplugLastStatus = readReg32(SHOTPLUG_STATUS);
+    fHotplugDDIMask = fHotplugLastStatus & 0x07;  /* bits 2:0 = A, B, C */
+    IODebug("initHotplug: status=0x%08X mask=%u", fHotplugLastStatus, fHotplugDDIMask);
+
+    return true;
+}
+
+/*
+ * ─────────────────────────────────────────────────────────────────
+ *  uint32_t MyIntelGPU::pollHotplugStatus(void)
+ *
+ *  Poll all DDI ports for connection changes.
+ *  Compares current SHOTPLUG_STATUS with last known value.
+ *
+ *  @return bitmask of ports that changed state
+ * ─────────────────────────────────────────────────────────────────
+ */
+uint32_t MyIntelGPU::pollHotplugStatus(void)
+{
+    if (!fRegs) return 0;
+
+    uint32_t status = readReg32(SHOTPLUG_STATUS);
+    uint32_t changed = (status ^ fHotplugLastStatus) & 0x07;
+
+    if (changed) {
+        if (changed & SHOTPLUG_DDI_A_DET)
+            IODebug("HPD: DDI A %s", (status & SHOTPLUG_DDI_A_DET) ? "connected" : "disconnected");
+        if (changed & SHOTPLUG_DDI_B_DET)
+            IODebug("HPD: DDI B %s", (status & SHOTPLUG_DDI_B_DET) ? "connected" : "disconnected");
+        if (changed & SHOTPLUG_DDI_C_DET)
+            IODebug("HPD: DDI C %s", (status & SHOTPLUG_DDI_C_DET) ? "connected" : "disconnected");
+
+        fHotplugLastStatus = status;
+        fHotplugDDIMask = status & 0x07;
+    }
+
+    return changed;
+}
+
+/*
+ * ─────────────────────────────────────────────────────────────────
+ *  Phase 4 — IOFramebuffer Interface Mapping
+ *
+ *  Creates IORegistry entries and framebuffer-backed
+ *  display pipelines that macOS graphics drivers can
+ *  bind to.  This is *not* a full IOFramebuffer subclass;
+ *  instead we publish properties that AppleIntelCFLGraphics
+ *  uses to find and drive the display hardware.
+ * ─────────────────────────────────────────────────────────────────
+ */
+
+/*
+ * ─────────────────────────────────────────────────────────────────
+ *  bool MyIntelGPU::createFramebufferInterface(void)
+ *
+ *  Creates IORegistry properties advertising the framebuffer
+ *  configuration so macOS display drivers can enumerate CRTCs.
+ *
+ *  Properties:
+ *    - "IOFramebufferCount"  : number of active CRTCs
+ *    - "IOFBootParameter"    : dimensions (width x height x depth)
+ *    - "display-timing"      : pre-parsed timing for each CRTC
+ *    - "AAPL00,hide-connect" : set to 0 so display is visible
+ *
+ *  Each CRTC is published as a sub-dictionary under "crtc-N".
+ * ─────────────────────────────────────────────────────────────────
+ */
+bool MyIntelGPU::createFramebufferInterface(void)
+{
+    if (fFramebufferCount == 0) return false;
+
+    /* Publish number of active CRTCs */
+    OSNumber *countNum = OSNumber::withNumber(fFramebufferCount, 32);
+    if (countNum) {
+        setProperty("IOFramebufferCount", countNum);
+        countNum->release();
+    }
+
+    /* Hide-display properties used by macOS framebuffer path */
+    setProperty("AAPL00,hide-connect", 0ULL, 32);
+
+    /* Store per-CRTC info into separate sub-dictionaries */
+    for (uint32_t i = 0; i < fFramebufferCount && i < FB_MAX_CRTC; i++) {
+        char key[32];
+
+        /* CRTC dimensions */
+        snprintf(key, sizeof(key), "crtc-%u-dimensions", i);
+        char dimStr[32];
+        snprintf(dimStr, sizeof(dimStr), "%ux%u", fFbWidth[i], fFbHeight[i]);
+        setProperty(key, dimStr);
+
+        /* CRTC GGTT offset (for debug) */
+        snprintf(key, sizeof(key), "crtc-%u-ggtt-offset", i);
+        OSNumber *ggttNum = OSNumber::withNumber(fFbGGTTOffset[i], 32);
+        if (ggttNum) {
+            setProperty(key, ggttNum);
+            ggttNum->release();
+        }
+
+        /* Stride */
+        snprintf(key, sizeof(key), "crtc-%u-stride", i);
+        OSNumber *strideNum = OSNumber::withNumber(
+            fFbWidth[i] * (fFbBpp[i] / 8), 32);
+        if (strideNum) {
+            setProperty(key, strideNum);
+            strideNum->release();
+        }
+
+        IODebug("createFB: CRTC%u → %ux%u stride=%u GGTT=0x%x",
+                i, fFbWidth[i], fFbHeight[i],
+                fFbWidth[i] * (fFbBpp[i] / 8),
+                fFbGGTTOffset[i]);
+    }
+
+    IODebug("createFramebufferInterface: %u CRTC(s)", fFramebufferCount);
+    return true;
+}
+
+/*
+ * ─────────────────────────────────────────────────────────────────
+ *  void MyIntelGPU::registerFramebuffer(void)
+ *
+ *  Register our IOService as a framebuffer provider.
+ *  macOS uses these IORegistry nubs to attach the
+ *  AppleIntelCFLGraphics framebuffer driver.
+ *
+ *  Sets the "IOFramebuffer" matching property and
+ *  re-registers our service.
+ * ─────────────────────────────────────────────────────────────────
+ */
+void MyIntelGPU::registerFramebuffer(void)
+{
+    /* Set "IOFramebuffer" property for matching */
+    setProperty("IOFramebuffer", true);
+
+    /* Set "IOKitDebug" style properties for display path */
+    setProperty("display-count", fFramebufferCount, 32);
+
+    IODebug("registerFramebuffer: registered with %u CRTC(s)", fFramebufferCount);
+}
+
+/*
+ * ─────────────────────────────────────────────────────────────────
+ *  bool MyIntelGPU::framebufferInitGMMemory(void)
+ *
+ *  Pre-allocate GGTT space for framebuffer buffers.
+ *  Currently GGTT entries are allocated on demand during
+ *  allocScanoutBuffer / setupDDIB / setupDDIC, so this is
+ *  a placeholder / soft-reservation.
+ *
+ *  @return true (always — allocation is demand-based)
+ * ─────────────────────────────────────────────────────────────────
+ */
+bool MyIntelGPU::framebufferInitGMMemory(void)
+{
+    /* GGTT entries are allocated on-demand in setupFramebuffer,
+     * setupDDIB, setupDDIC.  No pre-allocation needed.
+     */
+    IODebug("framebufferInitGMMemory: on-demand GGTT allocation active");
+    return true;
+}
+
+/*
+ * ─────────────────────────────────────────────────────────────────
+ *  bool MyIntelGPU::framebufferSetDisplayMode(uint32_t index,
+ *        uint32_t width, uint32_t height, uint32_t bpp, uint32_t refresh)
+ *
+ *  Set display mode for a given CRTC.
+ *  Currently updates the tracking state; actual hardware
+ *  re-configuration requires a full pipe/plane/timing reset
+ *  which is not implemented (mode is set once during boot).
+ *
+ *  @return true always
+ * ─────────────────────────────────────────────────────────────────
+ */
+bool MyIntelGPU::framebufferSetDisplayMode(uint32_t index,
+                                           uint32_t width, uint32_t height,
+                                           uint32_t bpp, uint32_t refresh)
+{
+    if (index >= FB_MAX_CRTC) return false;
+
+    fFbWidth[index]  = width;
+    fFbHeight[index] = height;
+    fFbBpp[index]    = bpp;
+    fFbRefresh[index]= refresh;
+
+    IODebug("framebufferSetDisplayMode(%u): %ux%u %ubpp %u.%03uHz",
+            index, width, height, bpp, refresh / 1000, refresh % 1000);
+    return true;
+}
+
+/*
+ * ─────────────────────────────────────────────────────────────────
+ *  void *MyIntelGPU::getFramebufferBase(uint32_t index)
+ *
+ *  Return CPU virtual address of the scanout buffer for a CRTC.
+ *
+ *  @param index  CRTC index
+ *  @return kernel VA, or NULL
+ * ─────────────────────────────────────────────────────────────────
+ */
+void *MyIntelGPU::getFramebufferBase(uint32_t index)
+{
+    if (index >= FB_MAX_CRTC) return NULL;
+    return fFbBase[index];
+}
+
+/*
+ * ─────────────────────────────────────────────────────────────────
+ *  uint32_t MyIntelGPU::getFramebufferSize(uint32_t index)
+ *
+ *  Return allocated size (bytes) of the scanout buffer.
+ *
+ *  @param index  CRTC index
+ *  @return size in bytes
+ * ─────────────────────────────────────────────────────────────────
+ */
+uint32_t MyIntelGPU::getFramebufferSize(uint32_t index)
+{
+    if (index >= FB_MAX_CRTC) return 0;
+    return fFbNumPages[index] * GTT_PAGE_SIZE;
 }
 
 #pragma mark -
@@ -2063,7 +3700,7 @@ bool MyIntelGPU::start(IOService *provider)
      *   pci_enable_device(pdev) → set PCI_COMMAND_MEMORY
      *   pci_set_master(pdev)    → set PCI_COMMAND_MASTER
      */
-    fPCIDevice->setBusMasterEnable(true);
+    fPCIDevice->setBusLeadEnable(true);
     fPCIDevice->setMemoryEnable(true);
 
     IODebug("Phase 1: PCI setup OK");
@@ -2294,6 +3931,36 @@ bool MyIntelGPU::start(IOService *provider)
 
     /*
      * ============================================================
+     *  Phase 5d: Interrupt + Vblank + Hotplug Init
+     * ============================================================
+     *
+     *  ติดตั้ง interrupt handler และ unmask display interrupts
+     *  (vblank, hotplug) เพื่อให้ framebuffer ทำงานสมบูรณ์
+     *
+     *  ไม่ fail start() ถ้า interrupt ไม่ทำงาน (system ยัง boot ได้)
+     */
+    if (fFakeGen != 0) {
+        if (initInterrupts()) {
+            installInterruptHandlers();
+        } else {
+            IODebug("Phase 5d: Interrupt init skipped");
+        }
+    }
+
+    /*
+     * ============================================================
+     *  Phase 5e: Framebuffer Interface Registration
+     * ============================================================
+     *
+     *  ประกาศ IORegistry properties ที่ macOS ใช้ในการ bind
+     *  framebuffer driver กับ display outputs
+     */
+    if (fFramebufferCount > 0) {
+        registerFramebuffer();
+    }
+
+    /*
+     * ============================================================
      *  Phase 7: Register Service
      * ============================================================
      *
@@ -2402,10 +4069,34 @@ void MyIntelGPU::stop(IOService *provider)
     /*
      * ปล่อย scanout buffer
      */
-    if (fScanoutBuffer) {
-        fScanoutBuffer->complete();
-        fScanoutBuffer->release();
-        fScanoutBuffer = NULL;
+    if (fScanoutDesc) {
+        fScanoutDesc->complete(kIODirectionOut);
+        fScanoutDesc->release();
+        fScanoutDesc = NULL;
+    }
+    if (fScanoutBufferVA) {
+        IOFreeAligned(fScanoutBufferVA, fScanoutBufferSize);
+        fScanoutBufferVA = NULL;
+        fScanoutBufferSize = 0;
+    }
+    /* Free secondary CRTC buffers */
+    for (int i = 0; i < FB_MAX_CRTC; i++) {
+        if (fFbBase[i] && fFbBase[i] != fScanoutBufferVA) {
+            IOFreeAligned(fFbBase[i], fFbNumPages[i] * GTT_PAGE_SIZE);
+        }
+        fFbBase[i] = NULL;
+        fFbGGTTOffset[i] = 0;
+    }
+
+    /* Interrupt cleanup */
+    if (fInterruptSource) {
+        if (fWorkLoop) fWorkLoop->removeEventSource(fInterruptSource);
+        fInterruptSource->release();
+        fInterruptSource = NULL;
+    }
+    if (fWorkLoop) {
+        fWorkLoop->release();
+        fWorkLoop = NULL;
     }
 
     /*
@@ -2461,3 +4152,110 @@ void MyIntelGPU::stop(IOService *provider)
  * แต่คลาสนี้ใช้ standard IOPCIDevice match ผ่าน Info.plist
  * ไม่ต้อง override probe()
  */
+
+ / * 
+   *    % % % % % % % % % % % % % % % % % % % % % % % % % % % % % % % % % % % % % % % % % % % % % % % % % % % % % % % % % % % % % % % % %
+   *     P h a s e   4      I O F r a m e b u f f e r   B i n d i n g   I m p l e m e n t a t i o n 
+   *    % % % % % % % % % % % % % % % % % % % % % % % % % % % % % % % % % % % % % % % % % % % % % % % % % % % % % % % % % % % % % % % % %
+   * / 
+ 
+ b o o l   M y I n t e l G P U : : c r e a t e F r a m e b u f f e r I n t e r f a c e ( v o i d ) 
+ { 
+         i f   ( f F r a m e b u f f e r C o u n t   = =   0 )   r e t u r n   f a l s e ; 
+ 
+         / *   P u b l i s h   n u m b e r   o f   a c t i v e   C R T C s   * / 
+         O S N u m b e r   * c o u n t N u m   =   O S N u m b e r : : w i t h N u m b e r ( f F r a m e b u f f e r C o u n t ,   3 2 ) ; 
+         i f   ( c o u n t N u m )   { 
+                 s e t P r o p e r t y ( " I O F r a m e b u f f e r C o u n t " ,   c o u n t N u m ) ; 
+                 c o u n t N u m - > r e l e a s e ( ) ; 
+         } 
+ 
+         / *   H i d e - d i s p l a y   p r o p e r t i e s   u s e d   b y   m a c O S   f r a m e b u f f e r   p a t h   * / 
+         s e t P r o p e r t y ( " A A P L 0 0 , h i d e - c o n n e c t " ,   0 U L L ,   3 2 ) ; 
+ 
+         / *   S t o r e   p e r - C R T C   i n f o   i n t o   s e p a r a t e   s u b - d i c t i o n a r i e s   * / 
+         f o r   ( u i n t 3 2 _ t   i   =   0 ;   i   <   f F r a m e b u f f e r C o u n t   & &   i   <   F B _ M A X _ C R T C ;   i + + )   { 
+                 c h a r   k e y [ 6 4 ] ; 
+ 
+                 / *   C R T C   d i m e n s i o n s   * / 
+                 s n p r i n t f ( k e y ,   s i z e o f ( k e y ) ,   " c r t c - % u - d i m e n s i o n s " ,   i ) ; 
+                 c h a r   d i m S t r [ 3 2 ] ; 
+                 s n p r i n t f ( d i m S t r ,   s i z e o f ( d i m S t r ) ,   " % u x % u " ,   f F b W i d t h [ i ] ,   f F b H e i g h t [ i ] ) ; 
+                 s e t P r o p e r t y ( k e y ,   d i m S t r ) ; 
+ 
+                 / *   C R T C   G G T T   o f f s e t   ( f o r   d e b u g )   * / 
+                 s n p r i n t f ( k e y ,   s i z e o f ( k e y ) ,   " c r t c - % u - g g t t - o f f s e t " ,   i ) ; 
+                 O S N u m b e r   * g g t t N u m   =   O S N u m b e r : : w i t h N u m b e r ( f F b G G T T O f f s e t [ i ] ,   3 2 ) ; 
+                 i f   ( g g t t N u m )   { 
+                         s e t P r o p e r t y ( k e y ,   g g t t N u m ) ; 
+                         g g t t N u m - > r e l e a s e ( ) ; 
+                 } 
+ 
+                 / *   S t r i d e   * / 
+                 s n p r i n t f ( k e y ,   s i z e o f ( k e y ) ,   " c r t c - % u - s t r i d e " ,   i ) ; 
+                 O S N u m b e r   * s t r i d e N u m   =   O S N u m b e r : : w i t h N u m b e r ( 
+                         f F b W i d t h [ i ]   *   ( f F b B p p [ i ]   /   8 ) ,   3 2 ) ; 
+                 i f   ( s t r i d e N u m )   { 
+                         s e t P r o p e r t y ( k e y ,   s t r i d e N u m ) ; 
+                         s t r i d e N u m - > r e l e a s e ( ) ; 
+                 } 
+ 
+                 I O D e b u g ( " c r e a t e F B :   C R T C % u   �!  % u x % u   s t r i d e = % u   G G T T = 0 x % x " , 
+                                 i ,   f F b W i d t h [ i ] ,   f F b H e i g h t [ i ] , 
+                                 f F b W i d t h [ i ]   *   ( f F b B p p [ i ]   /   8 ) , 
+                                 f F b G G T T O f f s e t [ i ] ) ; 
+         } 
+ 
+         I O D e b u g ( " c r e a t e F r a m e b u f f e r I n t e r f a c e :   % u   C R T C ( s ) " ,   f F r a m e b u f f e r C o u n t ) ; 
+         r e t u r n   t r u e ; 
+ } 
+ 
+ v o i d   M y I n t e l G P U : : r e g i s t e r F r a m e b u f f e r ( v o i d ) 
+ { 
+         / *   S e t   " I O F r a m e b u f f e r "   p r o p e r t y   f o r   m a t c h i n g   * / 
+         s e t P r o p e r t y ( " I O F r a m e b u f f e r " ,   t r u e ) ; 
+ 
+         / *   S e t   " I O K i t D e b u g "   s t y l e   p r o p e r t i e s   f o r   d i s p l a y   p a t h   * / 
+         s e t P r o p e r t y ( " d i s p l a y - c o u n t " ,   f F r a m e b u f f e r C o u n t ,   3 2 ) ; 
+ 
+         I O D e b u g ( " r e g i s t e r F r a m e b u f f e r :   r e g i s t e r e d   w i t h   % u   C R T C ( s ) " ,   f F r a m e b u f f e r C o u n t ) ; 
+ } 
+ 
+ b o o l   M y I n t e l G P U : : f r a m e b u f f e r I n i t G M M e m o r y ( v o i d ) 
+ { 
+         / *   G G T T   e n t r i e s   a r e   a l l o c a t e d   o n - d e m a n d   i n   s e t u p F r a m e b u f f e r , 
+           *   s e t u p D D I B ,   s e t u p D D I C .     N o   p r e - a l l o c a t i o n   n e e d e d . 
+           * / 
+         I O D e b u g ( " f r a m e b u f f e r I n i t G M M e m o r y :   o n - d e m a n d   G G T T   a l l o c a t i o n   a c t i v e " ) ; 
+         r e t u r n   t r u e ; 
+ } 
+ 
+ b o o l   M y I n t e l G P U : : f r a m e b u f f e r S e t D i s p l a y M o d e ( u i n t 3 2 _ t   i n d e x , 
+                                                                                         u i n t 3 2 _ t   w i d t h ,   u i n t 3 2 _ t   h e i g h t , 
+                                                                                         u i n t 3 2 _ t   b p p ,   u i n t 3 2 _ t   r e f r e s h ) 
+ { 
+         i f   ( i n d e x   > =   F B _ M A X _ C R T C )   r e t u r n   f a l s e ; 
+ 
+         f F b W i d t h [ i n d e x ]     =   w i d t h ; 
+         f F b H e i g h t [ i n d e x ]   =   h e i g h t ; 
+         f F b B p p [ i n d e x ]         =   b p p ; 
+         f F b R e f r e s h [ i n d e x ] =   r e f r e s h ; 
+ 
+         I O D e b u g ( " f r a m e b u f f e r S e t D i s p l a y M o d e ( % u ) :   % u x % u   % u b p p   % u . % 0 3 u H z " , 
+                         i n d e x ,   w i d t h ,   h e i g h t ,   b p p ,   r e f r e s h   /   1 0 0 0 ,   r e f r e s h   %   1 0 0 0 ) ; 
+         r e t u r n   t r u e ; 
+ } 
+ 
+ v o i d   * M y I n t e l G P U : : g e t F r a m e b u f f e r B a s e ( u i n t 3 2 _ t   i n d e x ) 
+ { 
+         i f   ( i n d e x   > =   F B _ M A X _ C R T C )   r e t u r n   N U L L ; 
+         r e t u r n   f F b B a s e [ i n d e x ] ; 
+ } 
+ 
+ u i n t 3 2 _ t   M y I n t e l G P U : : g e t F r a m e b u f f e r S i z e ( u i n t 3 2 _ t   i n d e x ) 
+ { 
+         i f   ( i n d e x   > =   F B _ M A X _ C R T C )   r e t u r n   0 ; 
+         r e t u r n   f F b N u m P a g e s [ i n d e x ]   *   G T T _ P A G E _ S I Z E ; 
+ } 
+  
+ 

@@ -47,17 +47,19 @@ endif
 # -DKERNEL          : 定义 kernel build
 # -D__STRICT_BSD__  : strict POSIX/BSD namespaces
 CXXFLAGS = -std=c++11 \
-           -mkernel \
-           -arch x86_64 \
-           -nostdlib \
-           -fno-builtin \
-           -fno-exceptions \
-           -fno-rtti \
-           -DKERNEL \
-           -D__STRICT_BSD__ \
-           -I$(KERNEL_HDRS) \
-           -I$(SDK_PATH)/System/Library/Frameworks/Kernel.framework/Headers \
-           -I$(SDK_PATH)/usr/include
+            -mkernel \
+            -arch x86_64 \
+            -nostdlib \
+            -fno-builtin \
+            -fno-exceptions \
+            -fno-rtti \
+            -DKERNEL \
+            -D__STRICT_BSD__ \
+            -Wno-inconsistent-missing-override \
+            -Wno-deprecated-declarations \
+            -I$(KERNEL_HDRS) \
+            -I$(SDK_PATH)/System/Library/Frameworks/Kernel.framework/Headers \
+            -I$(SDK_PATH)/usr/include
 
 # ─── Linker Flags ────────────────────────────────────────────────
 # -r              : relocatable object (kext = kernel module)

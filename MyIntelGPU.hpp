@@ -210,7 +210,45 @@
 #define TRANS_CONF_REG          0x1C
 #define TRANS_DDI_FUNC_CTL_REG  0x100
 
+/* Transcoder Timing Register Offsets (Gen12+) */
+#define TRANS_HTOTAL_REG        0x00
+#define TRANS_HSYNC_REG         0x04
+#define TRANS_VTOTAL_REG        0x08
+#define TRANS_VSYNC_REG         0x0C
+#define TRANS_VBLANK_REG        0x10
+#define TRANS_HBLANK_REG        0x14
+
 #define DDI_BUF_CTL_REG         0x00
+#define DDI_AUX_CTL_REG         0x0C
+#define DDI_AUX_DATA_BASE       0x10   /* 4 x 32-bit data registers */
+#define DP_TP_CTL_REG           0x40
+#define DP_TP_STATUS_REG        0x44
+
+/* DDI AUX Control bits */
+#define DDI_AUX_CTL_SEND        (1U << 31)
+#define DDI_AUX_CTL_DONE        (1U << 30)
+#define DDI_AUX_CTL_TIMEOUT     (1U << 28)
+#define DDI_AUX_CTL_ADDR_SHIFT  24
+#define DDI_AUX_CTL_ADDR(x)     (((x) & 0x7) << DDI_AUX_CTL_ADDR_SHIFT)
+#define DDI_AUX_CTL_TIMER_SHIFT 8
+#define DDI_AUX_CTL_TIMER_400US (0x3 << DDI_AUX_CTL_TIMER_SHIFT)
+#define DDI_AUX_CTL_MSG_SIZE(x) ((x) & 0xF)
+
+/* DP Transport Control bits */
+#define DP_TP_CTL_ENABLE        (1U << 31)
+#define DP_TP_CTL_MODE_SST      (0x0 << 27)
+#define DP_TP_CTL_MODE_MST      (0x1 << 27)
+#define DP_TP_CTL_ENHANCED_FRAME (1 << 18)
+#define DP_TP_CTL_FEC_ENABLE    (1U << 30)
+#define DP_TP_CTL_LINK_TRAIN_PAT1  (0x0 << 8)
+#define DP_TP_CTL_LINK_TRAIN_PAT2  (0x1 << 8)
+#define DP_TP_CTL_LINK_TRAIN_IDLE  (0x2 << 8)
+#define DP_TP_CTL_LINK_TRAIN_NORMAL (0x3 << 8)
+
+/* EDID / DPCD constants */
+#define EDID_BLOCK_SIZE         128
+#define EDID_I2C_ADDR           0x50
+#define DDC_SEGMENT_ADDR        0x30
 
 /* Pipe config bits */
 #define PIPECONF_ENABLE         (1U << 31)
@@ -269,6 +307,10 @@
  */
 #define CFL_BLC_PWM_CTL      0x48250   /* Coffee Lake backlight */
 #define RPL_BLC_PWM_CTL      0xC8250   /* Raptor Lake backlight */
+#define BLC_PWM_DUTY_OFF      0x4      /* Duty cycle relative to CTL */
+#define BLC_PWM_PERIOD_OFF    0x8      /* Period relative to CTL */
+#define BLC_PWM_CTL_ENABLE    (1U << 31)
+#define BLC_PWM_CTL_POLARITY  (1U << 29)
 
 /*
  *  CDCLK Control — ต่างกัน
@@ -303,7 +345,6 @@
 #define GMD_ID_DISPLAY      0x510A0    /* Display IP version (MTL+)
                                           อ่านเพื่อ verify display gen */
 
-#define GEN11_GT_INTR_DW0   0x44074    /* GT Interrupt DW0 (shared) */
 #define ENGINE_TAIL_REG      0x80      /* Ring Tail Register offset
                                           (สัมพัทธ์จาก engine base) */
 #define ENGINE_HEAD_REG      0x34      /* Ring Head Register offset */
@@ -311,7 +352,74 @@
 #define ENGINE_START_REG     0x38      /* Ring Start (Base Address) */
 
 #define GFX_FLSH_CNTL_GEN6  0x10100   /* GGTT TLB Invalidate Register
-                                           = write 1 → flush */
+                                            = write 1 → flush */
+
+/*
+ * ─────────────────────────────────────────────
+ *  Phase 3 — GT Interrupts, Vblank, Hotplug
+ * ─────────────────────────────────────────────
+ */
+
+/* GT Engine Interrupt Registers (Gen11+) */
+#define GEN11_GT_INTR_DW0      0x44074   /* GT Interrupt DW0 (shared) */
+#define GEN11_GT_INTR_DW1      0x44078   /* GT Interrupt DW1 */
+#define GEN11_GT_INTR_DW2      0x4407C   /* GT Interrupt DW2 */
+#define GEN11_GT_INTR_MASK0    0x440A4   /* GT Interrupt Mask DW0 */
+#define GEN11_GT_INTR_MASK1    0x440A8   /* GT Interrupt Mask DW1 */
+#define GEN11_GT_INTR_MASK2    0x440AC   /* GT Interrupt Mask DW2 */
+#define GEN11_RENDER_INTR_ID   0x44008   /* Render CS interrupt ID */
+#define GEN11_VCS0_INTR_ID     0x44010   /* VCS0 interrupt ID */
+#define GEN11_VECS0_INTR_ID    0x44018   /* VECS0 interrupt ID */
+#define GEN11_BCS_INTR_ID      0x44020   /* BCS interrupt ID */
+#define GEN11_VCS1_INTR_ID     0x44028   /* VCS1 (Gen12+) */
+#define GEN11_VCS2_INTR_ID     0x44030   /* VCS2 (Gen12+) */
+
+/* Display Interrupt Registers (Gen12+) */
+#define GEN12_DISPLAY_INT_CTL  0x44200   /* Display interrupt control */
+#define GEN12_DISPLAY_INT_MASK 0x44204   /* Display interrupt mask */
+#define GEN12_DISPLAY_INT_ID   0x44208   /* Display interrupt identity */
+
+#define DISPLAY_INT_CTL_ENABLE (1U << 31)
+#define DISPLAY_INT_VBLANK_A   (1 << 0)
+#define DISPLAY_INT_VBLANK_B   (1 << 1)
+#define DISPLAY_INT_VBLANK_C   (1 << 2)
+#define DISPLAY_INT_HOTPLUG_DDI_A (1 << 16)
+#define DISPLAY_INT_HOTPLUG_DDI_B (1 << 17)
+#define DISPLAY_INT_HOTPLUG_DDI_C (1 << 18)
+#define DISPLAY_INT_HOTPLUG_MASK  0x00070000
+
+/* Pipe Scanline / Frame Count Registers (Gen12+) */
+#define PIPE_DSL_REG             0x00   /* Display Scan Line */
+#define PIPE_FRMCOUNT_REG        0x04   /* Frame Counter */
+#define PIPE_FLIPCOUNT_MASK      0x3F000000
+
+/* Hotplug Detect / Status */
+#define SHOTPLUG_CTL             0x44410  /* Gen12+ shotplug control */
+#define SHOTPLUG_DDI_A_DET      (1 << 0)
+#define SHOTPLUG_DDI_B_DET      (1 << 1)
+#define SHOTPLUG_DDI_C_DET      (1 << 2)
+#define SHOTPLUG_DDI_A_EN       (1 << 8)
+#define SHOTPLUG_DDI_B_EN       (1 << 9)
+#define SHOTPLUG_DDI_C_EN       (1 << 10)
+#define SHOTPLUG_STATUS          0x44414  /* HPD status */
+#define SHOTPLUG_INT_EN          0x44418  /* HPD interrupt enable */
+
+/* IIR / IER (Interrupt Identity/Enable Register) on display engine */
+#define GEN12_PIPEA_IIR          0x70010  /* Pipe A IIR */
+#define GEN12_PIPEB_IIR          0x71010  /* Pipe B IIR */
+#define GEN12_PIPEC_IIR          0x72010  /* Pipe C IIR */
+#define PIPE_IIR_VBLANK          (1 << 0)
+#define PIPE_IIR_HOTPLUG         (1 << 16)
+#define PIPE_IIR_FIFO_UNDERRUN   (1 << 19)
+#define PIPE_IIR_ASYNC_FLIP      (1 << 21)
+#define PIPE_IIR_FLIP_DONE       (1 << 22)
+#define PIPE_IIR_MASK            0x00FF00FF
+
+/* Framebuffer Interface Constants */
+#define FB_MAX_CRTC              3
+#define FB_INDEX_PRIMARY         0
+#define FB_INDEX_EXTERNAL1       1
+#define FB_INDEX_EXTERNAL2       2
                                           
 /*
  * ─────────────────────────────────────────────
@@ -668,6 +776,307 @@ public:
 
     /*
      * ─────────────────────────────────────
+     *  Phase 2.3 — EDID / DDI Config / Display Node
+     * ─────────────────────────────────────
+     */
+
+    /*!
+     * @brief  AUX channel transaction (I2C-over-AUX)
+     *
+     *  Sends and receives data over the DDI AUX channel.
+     *  Used for EDID read and DPCD access.
+     *
+     *  @param port     DDI port index (0=DDI_A, 1=DDI_B)
+     *  @param ddcAddr  7-bit I2C address (0x50 for EDID)
+     *  @param sendBuf  data to send (NULL for read-only)
+     *  @param sendLen  bytes to send (max 16)
+     *  @param recvBuf  buffer for received data
+     *  @param recvLen  bytes to receive (max 16)
+     *  @return true on ACK
+     */
+    virtual bool ddiAuxXfer(uint32_t port, uint32_t ddcAddr,
+                            const uint8_t *sendBuf, uint32_t sendLen,
+                            uint8_t *recvBuf, uint32_t recvLen);
+
+    /*!
+     * @brief  Read EDID via DDI AUX channel
+     *
+     *  Performs I2C-over-AUX transaction sequence:
+     *    1. Write EDID offset byte to I2C addr 0x50
+     *    2. Read 128 (or 256) bytes in 16-byte chunks
+     *
+     *  @param port  DDI port index
+     *  @return true if valid EDID read
+     */
+    virtual bool readEdidFromAux(uint32_t port);
+
+    /*!
+     * @brief  Attempt EDID from IORegistry (bootloader-injected)
+     *
+     *  Checks for an "EDID" data property on our service in IORegistry.
+     *  Bootloaders like OpenCore can pre-inject this.
+     *
+     *  @return true if EDID found in registry
+     */
+    virtual bool readEdidFromRegistry(void);
+
+    /*!
+     * @brief  Parse raw EDID bytes to extract display parameters
+     *
+     *  Fills fDisplayWidth, fDisplayHeight, fDisplayRefresh,
+     *  fDisplayName from the Preferred Timing descriptor in EDID.
+     *
+     *  @return true if at least one valid timing found
+     */
+    virtual bool parseEdid(void);
+
+    /*!
+     * @brief  Set transcoder display timings from raw params
+     *
+     *  Writes HTOTAL, HSYNC, VTOTAL, VSYNC, HBLANK, VBLANK
+     *  registers for the specified transcoder.
+     *
+     *  @param trans      transcoder index (0=TRANS_A)
+     *  @param hdisplay   active horizontal pixels
+     *  @param hsync_start  hdisplay + hfront_porch
+     *  @param hsync_end    hsync_start + hsync_width
+     *  @param htotal      hsync_end + hback_porch
+     *  @param vdisplay   active vertical lines
+     *  @param vsync_start vdisplay + vfront_porch
+     *  @param vsync_end   vsync_start + vsync_width
+     *  @param vtotal      vsync_end + vback_porch
+     */
+    virtual void setDisplayTimings(uint32_t trans,
+                                   uint32_t hdisplay, uint32_t hsync_start,
+                                   uint32_t hsync_end, uint32_t htotal,
+                                   uint32_t vdisplay, uint32_t vsync_start,
+                                   uint32_t vsync_end, uint32_t vtotal);
+
+    /*!
+     * @brief  Configure DDI for DP/eDP output with link training
+     *
+     *  Sets link rate, lane count, performs link training
+     *  sequence: pattern 1 → pattern 2 → normal.
+     *
+     *  @param port     DDI port index
+     *  @param lanes    lane count (1, 2, or 4)
+     *  @param linkRate 0=1.62G, 1=2.7G, 2=5.4G, 3=8.1G
+     *  @return true on success
+     */
+    virtual bool configureDDIForDP(uint32_t port, uint32_t lanes, uint32_t linkRate);
+
+    /*!
+     * @brief  Configure DDI for HDMI output
+     *
+     *  Sets DDI_BUF_CTL for HDMI mode, configures DDI_BUF_TRANS
+     *  for proper vswing/pre-emphasis for HDMI signaling.
+     *
+     *  @param port  DDI port index
+     *  @return true on success
+     */
+    virtual bool configureDDIForHDMI(uint32_t port);
+
+    /*!
+     * @brief  Inject display node into IORegistry
+     *
+     *  Creates or updates IORegistry properties advertising
+     *  EDID data, connection type, and display parameters
+     *  so macOS recognises the display.
+     *
+     *  @param isInternal  true for eDP/LVDS, false for external
+     *  @param edid        raw EDID bytes
+     *  @param edidLen     EDID length in bytes
+     *  @return true on success
+     */
+    virtual bool injectDisplayNode(bool isInternal, const uint8_t *edid, uint32_t edidLen);
+
+    /*!
+     * @brief  Set backlight brightness
+     *  @param percent  0-100 brightness level
+     */
+    virtual void setBacklightBrightness(uint32_t percent);
+
+    /*!
+     * @brief  Enable or disable backlight PWM
+     *  @param on  true=enable, false=disable
+     */
+    virtual void enableBacklight(bool on);
+
+    /*!
+     * @brief  Probe DDI port for display presence
+     *  @param port  DDI port index (0=A, 1=B, etc.)
+     *  @return true if display detected
+     */
+    virtual bool probeDDI(uint32_t port);
+
+    /*!
+     * @brief  Setup DDI B for external monitor
+     */
+    virtual bool setupDDIB(void);
+
+    /*!
+     * @brief  Setup DDI C for external monitor
+     */
+    virtual bool setupDDIC(void);
+
+    /*!
+     * @brief  Probe and enable multi-monitor configuration
+     *  @return true if at least one external display configured
+     */
+    virtual bool setupMultiMonitor(void);
+
+    /*
+     * ─────────────────────────────────────
+     *  Phase 3 — Interrupts / Vblank / Hotplug
+     * ─────────────────────────────────────
+     */
+
+    /*!
+     * @brief  Initialise GT engine + display interrupt system
+     *
+     *  1. Map PCI interrupt line
+     *  2. Install interrupt handler via IOService
+     *  3. Mask all GT engine interrupts initially
+     *  4. Enable display interrupt control
+     */
+    virtual bool initInterrupts(void);
+
+    /*!
+     * @brief  Install interrupt handler on IOPCIDevice
+     *
+     *  Uses IOFilterInterruptEventSource or
+     *  fPCIDevice->registerInterrupt().
+     *
+     *  @return true on success
+     */
+    virtual bool installInterruptHandlers(void);
+
+    /*!
+     * @brief  Top-level interrupt handler (called from primary ISR)
+     *  @param src  interrupt source
+     *  @param count  number of pending interrupts
+     */
+    virtual void handleInterrupt(void *src, int count);
+
+    /*!
+     * @brief  Handle GT engine-specific interrupt
+     *  @param intrID  interrupt identity register value
+     */
+    virtual void handleGTInterrupt(uint32_t intrDW0);
+
+    /*!
+     * @brief  Handle display interrupt (vblank, hotplug)
+     */
+    virtual void handleDisplayInterrupt(void);
+
+    /*!
+     * @brief  Enable or disable VBLANK interrupt for a pipe
+     *  @param pipe   pipe index (0=PIPE_A)
+     *  @param enable true=enable, false=disable
+     *  @return true on success
+     */
+    virtual bool enableVblankInterrupt(uint32_t pipe, bool enable);
+
+    /*!
+     * @brief  Read current frame count from hardware
+     *  @param pipe  pipe index
+     *  @return frame count value
+     */
+    virtual uint32_t getFrameCount(uint32_t pipe);
+
+    /*!
+     * @brief  Read current scan line from hardware
+     *  @param pipe  pipe index
+     *  @return scan line number (0-vertical_total)
+     */
+    virtual uint32_t getScanLine(uint32_t pipe);
+
+    /*!
+     * @brief  Initialise hotplug detection
+     *
+     *  Enables HPD interrupts and creates a work loop
+     *  for polling DDI connection status.
+     *
+     *  @return true on success
+     */
+    virtual bool initHotplugDetect(void);
+
+    /*!
+     * @brief  Poll all DDI ports for connection changes
+     *
+     *  Reads SHOTPLUG_STATUS, compares with fHotplugDDIMask,
+     *  and logs connection events.
+     *
+     *  @return bitmask of ports with new connection status
+     */
+    virtual uint32_t pollHotplugStatus(void);
+
+    /*
+     * ─────────────────────────────────────
+     *  Phase 4 — IOFramebuffer Binding
+     * ─────────────────────────────────────
+     */
+
+    /*!
+     * @brief  Create framebuffer IORegistry interface
+     *
+     *  Creates a child nubs in IORegistry that match
+     *  IOFramebuffer for macOS graphics driver.
+     *  Sets up display mode settings per CRTC.
+     *
+     *  @return true on success
+     */
+    virtual bool createFramebufferInterface(void);
+
+    /*!
+     * @brief  Register our service as a framebuffer provider
+     *
+     *  Publishes IORegistry properties so AppleIntelCFLGraphics
+     *  can bind to our display outputs (similar to
+     *  IOFramebuffer::registerService).
+     */
+    virtual void registerFramebuffer(void);
+
+    /*!
+     * @brief  Initialise GTT memory for framebuffer interface
+     *
+     *  Pre-allocates GGTT space for up to FB_MAX_CRTC
+     *  scanout buffers.
+     *
+     *  @return true on success
+     */
+    virtual bool framebufferInitGMMemory(void);
+
+    /*!
+     * @brief  Set display mode for a given CRTC index
+     *
+     *  @param index   CRTC index (0=primary, 1=external1, 2=external2)
+     *  @param width   active pixels
+     *  @param height  active lines
+     *  @param bpp     bits per pixel (32)
+     *  @param refresh refresh rate in mHz
+     *  @return true on success
+     */
+    virtual bool framebufferSetDisplayMode(uint32_t index, uint32_t width,
+                                           uint32_t height, uint32_t bpp,
+                                           uint32_t refresh);
+
+    /*!
+     * @brief  Get CPU-accessible base address of framebuffer
+     *  @param index  CRTC index
+     *  @return virtual address, or NULL
+     */
+    virtual void *getFramebufferBase(uint32_t index);
+
+    /*!
+     * @brief  Get size (bytes) of framebuffer for a CRTC
+     *  @param index  CRTC index
+     *  @return size in bytes
+     */
+    virtual uint32_t getFramebufferSize(uint32_t index);
+
+    /*
+     * ─────────────────────────────────────
      *  FakeID Helpers
      * ─────────────────────────────────────
      */
@@ -764,13 +1173,46 @@ private:
     IOMemoryDescriptor      *fApertureDesc;    /*!< BAR2 IOMemoryDescriptor */
 
     /* Framebuffer State */
-    IOMemoryDescriptor      *fScanoutBuffer;   /*!< DMA buffer backing the scanout */
-    uint32_t                 fScanoutGGTTOffset;/*!< GGTT page index of scanout buffer */
-    uint32_t                 fScanoutNumPages;  /*!< Number of 4KB pages in scanout buffer */
-    uint32_t                 fScanoutWidth;     /*!< Active scanout width (pixels) */
-    uint32_t                 fScanoutHeight;    /*!< Active scanout height (pixels) */
-    uint32_t                 fScanoutStride;    /*!< Bytes per line */
-    uint32_t                 fScanoutFormat;    /*!< PLANE_CTL_FORMAT_* encoding */
+    IOMemoryDescriptor      *fScanoutDesc;      /*!< IOMemoryDescriptor backing scanout */
+    void                    *fScanoutBufferVA;   /*!< Kernel virtual address of scanout buffer */
+    IOPhysicalAddress        fScanoutBufferPA;   /*!< Physical address of scanout buffer */
+    uint32_t                 fScanoutBufferSize; /*!< Allocated size in bytes */
+    uint32_t                 fScanoutGGTTOffset; /*!< GGTT page index of scanout buffer */
+    uint32_t                 fScanoutNumPages;   /*!< Number of 4KB pages in scanout buffer */
+    uint32_t                 fScanoutWidth;      /*!< Active scanout width (pixels) */
+    uint32_t                 fScanoutHeight;     /*!< Active scanout height (pixels) */
+    uint32_t                 fScanoutBpp;        /*!< Bytes per pixel */
+    uint32_t                 fScanoutStride;     /*!< Bytes per line */
+    uint32_t                 fScanoutFormat;     /*!< PLANE_CTL_FORMAT_* encoding */
+
+    /* EDID / Display Info */
+    uint8_t                  fEdidData[EDID_BLOCK_SIZE * 2]; /*!< Raw EDID (up to 2 blocks) */
+    uint32_t                 fEdidLength;         /*!< Valid EDID bytes */
+    uint32_t                 fDisplayWidth;       /*!< Native width from EDID */
+    uint32_t                 fDisplayHeight;      /*!< Native height from EDID */
+    uint32_t                 fDisplayRefresh;     /*!< Preferred refresh rate (mHz) */
+    uint32_t                 fDisplayBpp;         /*!< Colour depth (bits) */
+    char                     fDisplayName[32];    /*!< Monitor name from EDID */
+    bool                     fEdidValid;          /*!< true after successful EDID parse */
+
+    /* Phase 3 — Interrupt / Vblank / Hotplug State */
+    IOInterruptEventSource  *fInterruptSource;    /*!< Work-loop interrupt source */
+    IOWorkLoop              *fWorkLoop;           /*!< IOWorkLoop for deferral */
+    uint32_t                 fGtIntrMaskDW0;      /*!< Saved GT interrupt mask DW0 */
+    uint32_t                 fDisplayIntrMask;    /*!< Display interrupt mask */
+    bool                     fInterruptsReady;    /*!< true after interrupt install */
+    uint32_t                 fHotplugDDIMask;     /*!< Bitmask of DDI ports connected */
+    uint32_t                 fHotplugLastStatus;  /*!< Previous SHOTPLUG_STATUS value */
+
+    /* Phase 4 — Framebuffer Interface (per-CRTC) */
+    uint32_t                 fFramebufferCount;   /*!< Number of active CRTCs */
+    uint32_t                 fFbWidth[FB_MAX_CRTC];
+    uint32_t                 fFbHeight[FB_MAX_CRTC];
+    uint32_t                 fFbBpp[FB_MAX_CRTC];
+    uint32_t                 fFbRefresh[FB_MAX_CRTC];   /*!< in mHz */
+    void                    *fFbBase[FB_MAX_CRTC];      /*!< CPU VA of scanout buffer */
+    uint32_t                 fFbGGTTOffset[FB_MAX_CRTC]; /*!< GGTT page index per CRTC */
+    uint32_t                 fFbNumPages[FB_MAX_CRTC];   /*!< Pages per CRTC */
 };
 
 #endif /* __MY_INTEL_GPU_HPP__ */
