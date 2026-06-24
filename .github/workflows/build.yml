@@ -58,8 +58,8 @@ jobs:
     - name: Upload Kext to GitHub Artifacts
       uses: actions/upload-artifact@v4
       with:
-        name: ${KEXT_NAME}.kext
-        path: ${KEXT_NAME}.kext/
+        name: ${{ env.KEXT_NAME }}.kext
+        path: ${{ env.KEXT_NAME }}.kext/
         if-no-files-found: error
         retention-days: 7
 
