@@ -65,31 +65,28 @@ CXXFLAGS = -std=c++11 \
 LDFLAGS = -r -keep_private_externs
 
 # ─── Sources ─────────────────────────────────────────────────────
-SRC = $(CLASS).cpp IntelFramebuffer.cpp
-OBJ = $(CLASS).o IntelFramebuffer.o
-HEADERS = $(CLASS).hpp IntelFramebuffer.hpp
+SRC = MyIntelGPU.cpp IntelFramebuffer.cpp
+OBJ = MyIntelGPU.o IntelFramebuffer.o
 
 .PHONY: all clean install load unload
 
 all: $(TARGET).kext/Contents/MacOS/$(TARGET)
 
-# ─── Compile each .cpp to .o ──────────────────────────────────
-$(CLASS).o: $(CLASS).cpp $(HEADERS) Info.plist
-	$(CC) $(CXXFLAGS) -c -o $@ $(CLASS).cpp
+# ─── Compile ─────────────────────────────────────────────────────
+%.o: %.cpp
+	$(CC) $(CXXFLAGS) -c -o $@ $<
 
-IntelFramebuffer.o: IntelFramebuffer.cpp $(HEADERS) Info.plist
-	$(CC) $(CXXFLAGS) -c -o $@ IntelFramebuffer.cpp
-
-# ─── Link .o files into kext binary ──────────────────────────
+# ─── Link ────────────────────────────────────────────────────────
 $(TARGET).kext/Contents/MacOS/$(TARGET): $(OBJ) Info.plist
-	@mkdir -p $(TARGET).kext/Contents/MacOS
-	cp Info.plist $(TARGET).kext/Contents/Info.plist
-	$(CC) $(CXXFLAGS) $(LDFLAGS) -o $@ $(OBJ)
-	@echo "─── Build complete: $(TARGET).kext ───"
+	mkdir -p "$(TARGET).kext/Contents/MacOS"
+	cp Info.plist "$(TARGET).kext/Contents/Info.plist"
+	$(CC) $(CXXFLAGS) $(LDFLAGS) -o "$@" $(OBJ)
+	ls -la "$(TARGET).kext/Contents/MacOS/"
+	echo "─── Build complete: $(TARGET).kext ───"
 
 # ─── Utilities ───────────────────────────────────────────────────
 clean:
-	rm -rf $(TARGET).kext $(OBJ) IntelFramebuffer.o
+	rm -rf $(TARGET).kext $(OBJ)
 
 install: all
 	sudo chown -R root:wheel $(TARGET).kext

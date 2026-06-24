@@ -465,10 +465,15 @@ bool IntelFramebuffer::installInterruptHandlers(void)
 
     /*
      * ตรวจสอบว่า PCI device supports interrupt
+     *
+     * Signature: IOReturn getInterruptType(UInt32 source, int *interruptType)
+     *   source = 0 (interrupt source index แรกเสมอ)
+     *   interruptType = output: kIOInterruptTypeLevel or kIOInterruptTypeEdge
      */
     int intrType = 0;
-    bool hasIntr = pciDev->getInterruptType(&intrType);
-    FBLog("  PCI interrupt type = 0x%08X (has=%d)", intrType, (int)hasIntr);
+    IOReturn ret = pciDev->getInterruptType(0, &intrType);
+    bool hasIntr = (ret == kIOReturnSuccess);
+    FBLog("  PCI interrupt type = 0x%08X (has=%d, ret=0x%08X)", intrType, (int)hasIntr, ret);
 
     if (!hasIntr || intrType == 0) {
         FBLog("WARNING: No interrupt type detected — continuing anyway");
