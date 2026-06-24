@@ -26,6 +26,7 @@
  *///=========================================================================
 
 #include "MyIntelGPU.hpp"
+#include "IntelFramebuffer.hpp"
 #include <libkern/libkern.h>
 #include <libkern/OSAtomic.h>
 #include <IOKit/IOLib.h>
@@ -129,6 +130,7 @@ bool MyIntelGPU::init(OSDictionary *dict)
     fTransCount   = 0;
     fMMIODesc     = NULL;
     fApertureDesc = NULL;
+    fFramebuffer  = NULL;
 
     /*
      * clear translation table ทั้งหมด
@@ -174,6 +176,11 @@ void MyIntelGPU::free()
     if (fApertureDesc) {
         fApertureDesc->release();
         fApertureDesc = NULL;
+    }
+
+    if (fFramebuffer) {
+        fFramebuffer->release();
+        fFramebuffer = NULL;
     }
 
     super::free();
@@ -1434,6 +1441,45 @@ bool MyIntelGPU::start(IOService *provider)
 
     /*
      * ============================================================
+     *  Phase 5c: IntelFramebuffer — Object Only (No Interrupts Yet)
+     * ============================================================
+     *
+     *  สร้าง Instance ของ IntelFramebuffer ไว้ก่อน
+     *  แต่ยังไม่เรียก initInterrupts() เพื่อป้องกัน Kernel Hang
+     *  ที่อาจเกิดจาก Interrupt Controller ยังไม่เสถียร
+     *  หลัง ExitBootServices
+     *
+     *  Lazy Init:
+     *    Interrupt จะถูก enable ผ่าน safeInitInterrupts()
+     *    ซึ่งถูก trigger โดย setProperties() หรือ
+     *    โดย IOFramebuffer ตอน start() จริง
+     *
+     *  Debug:
+     *    log นี้ต้องแสดง → ยืนยันว่า Phase 5c ผ่าน
+     *    ถ้าค้างก่อน log นี้ → ปัญหาใน initDisplay() หรือ Phase ก่อนหน้า
+     *    ถ้าค้างหลัง log นี้ → ปัญหาใน Phase 6+
+     *
+     *  Reference:
+     *    i915_irq.c — intel_irq_install (called later, not in probe)
+     *─────────────────────────────────────────────────────────────────
+     */
+    IODebug("Phase 5c: Creating IntelFramebuffer (no interrupts)...");
+
+    fFramebuffer = new IntelFramebuffer;
+    if (fFramebuffer) {
+        if (!fFramebuffer->init(NULL)) {
+            IODebug("ERROR: IntelFramebuffer::init() failed");
+            fFramebuffer->release();
+            fFramebuffer = NULL;
+        }
+    } else {
+        IODebug("ERROR: Failed to allocate IntelFramebuffer");
+    }
+
+    IODebug("Phase 5c: Initialized without Interrupts");
+
+    /*
+     * ============================================================
      *  Phase 6: GGTT Basic Init
      * ============================================================
      *
@@ -1557,6 +1603,15 @@ void MyIntelGPU::stop(IOService *provider)
     }
 
     /*
+     * ปล่อย IntelFramebuffer (Interrupt Manager)
+     */
+    if (fFramebuffer) {
+        fFramebuffer->disableInterrupts();
+        fFramebuffer->release();
+        fFramebuffer = NULL;
+    }
+
+    /*
      * reset translation state
      */
     fTransCount = 0;
@@ -1568,6 +1623,112 @@ void MyIntelGPU::stop(IOService *provider)
     super::stop(provider);
 
     IODebug("stop() — done");
+}
+
+#pragma mark -
+#pragma mark - safeInitInterrupts
+
+/*
+ * ─────────────────────────────────────────────────────────────────
+ *  bool MyIntelGPU::safeInitInterrupts(void)
+ *
+ *  เริ่มต้น Interrupt System แบบปลอดภัย
+ *
+ *  แตกต่างจาก initInterrupts() ใน start() ตรงที่:
+ *    1. หน่วงเวลา IODelay(2000) = 2ms ให้ HW Register เสถียร
+ *    2. ตรวจสอบสถานะ MMIO ก่อนเรียก framebuffer
+ *    3. กันซ้อน (re-entrant) — ถ้า init แล้ว → return true ทันที
+ *
+ *  เหมาะสำหรับเรียกหลังจาก Kernel State พร้อมแล้ว เช่น
+ *  ใน setProperties(), handleMessage(), หรือ IOFramebuffer::start()
+ *
+ *  Reference:
+ *    Linux i915: intel_irq_install() ถูกเรียกหลังจาก display init
+ *    ไม่ใช่ใน i915_probe() — ป้องกัน race condition
+ *─────────────────────────────────────────────────────────────────
+ */
+bool MyIntelGPU::safeInitInterrupts(void)
+{
+    IODebug("safeInitInterrupts: START");
+
+    /*
+     * Re-entrant guard — ถ้า init แล้ว ไม่ต้องทำซ้ำ
+     */
+    if (fFramebuffer && fFramebuffer->isInterruptsReady()) {
+        IODebug("safeInitInterrupts: already initialized");
+        return true;
+    }
+
+    if (!fFramebuffer) {
+        IODebug("safeInitInterrupts: ERROR — fFramebuffer is NULL");
+        return false;
+    }
+
+    if (!fRegs) {
+        IODebug("safeInitInterrupts: ERROR — MMIO not mapped");
+        return false;
+    }
+
+    /*
+     * หน่วงเวลา 2000 microseconds (2 มิลลิวินาที)
+     * เพื่อให้ Hardware Register ของ GPU มีเวลาเสถียร
+     * หลัง Kernel โหลดเสร็จ
+     *
+     * IODelay() เป็น busy-wait → ไม่ yield CPU
+     * แต่สำหรับ delay สั้น ๆ (2ms) ไม่เป็นปัญหา
+     */
+    IODebug("safeInitInterrupts: Delaying 2000us...");
+    IODelay(2000);
+
+    /*
+     * เรียก initInterrupts() จริง
+     */
+    IODebug("safeInitInterrupts: Calling initInterrupts...");
+    bool ok = fFramebuffer->initInterrupts(this);
+
+    IODebug("safeInitInterrupts: %s", ok ? "OK" : "FAILED");
+    return ok;
+}
+
+#pragma mark -
+#pragma mark - setProperties (Lazy Interrupt Trigger)
+
+/*
+ * ─────────────────────────────────────────────────────────────────
+ *  IOReturn MyIntelGPU::setProperties(OSObject *properties)
+ *
+ *  รับ Property Changes จาก IORegistry
+ *
+ *  ใช้เป็น Lazy Trigger สำหรับ safeInitInterrupts():
+ *    - เมื่อ IOFramebuffer หรือ User Space set property
+ *      → เราเริ่มต้น Interrupt System ถ้ายังไม่พร้อม
+ *    - ป้องกันการ init interrupt ตอน start() ที่อาจยังไม่ปลอดภัย
+ *
+ *  Reference:
+ *    IORegistryEntry::setProperties()
+ *    ใช้โดย IOFramebuffer เมื่อเริ่มทำงาน (binding)
+ *─────────────────────────────────────────────────────────────────
+ */
+IOReturn MyIntelGPU::setProperties(OSObject *properties)
+{
+    IODebug("setProperties: called");
+
+    /*
+     * Lazy init interrupts — ถ้ายังไม่พร้อม → init เดี๋ยวนี้
+     *
+     * ใช้เป็น trigger สำหรับการเริ่ม interrupt ในจังหวะที่
+     * IOFramebuffer เริ่มทำงาน (ซึ่งเป็นช่วงที่ปลอดภัยกว่า
+     * ตอน start() ของ kext หลัก)
+     */
+    if (!fFramebuffer || !fFramebuffer->isInterruptsReady()) {
+        IODebug("setProperties: Triggering safeInitInterrupts");
+        safeInitInterrupts();
+    }
+
+    /*
+     * ส่งต่อไปยัง super class เพื่อให้ IOKit ประมวลผล property
+     */
+    return super::setProperties(properties);
 }
 
 #pragma mark -

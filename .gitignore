@@ -1,6 +1,13 @@
-*.o
-*.o.tmp
-*.kext
-*.kext.gz
-.DS_Store
+# Build artifacts
 build/
+*.kext/
+*.o
+*.dSYM
+*.log
+
+# macOS specific
+.DS_Store
+
+# IDE/Editor folders
+.vscode/
+.idea/

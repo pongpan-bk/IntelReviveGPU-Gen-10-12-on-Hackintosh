@@ -182,7 +182,11 @@
                                           (มีเฉพาะ Gen12+ / Meteor Lake)
                                           read32(0xD8C) → ver/release */
 #define GMD_ID_DISPLAY      0x510A0    /* Display IP version (MTL+)
-                                          อ่านเพื่อ verify display gen */
+                                           อ่านเพื่อ verify display gen */
+
+#ifndef FB_MAX_CRTC
+#define FB_MAX_CRTC 3
+#endif
 
 #define GEN11_GT_INTR_DW0   0x44074    /* GT Interrupt DW0 (shared) */
 #define ENGINE_TAIL_REG      0x80      /* Ring Tail Register offset
@@ -450,6 +454,41 @@ public:
      */
     virtual uint32_t translateAddress(uint32_t fakeOffset);
 
+    /* Public Accessors สำหรับ child classes (IntelFramebuffer ฯลฯ) */
+    IOMemoryMap             *getMMIOMap(void) const { return fMMIOMap; }
+    volatile uint8_t        *getRegs(void) const { return fRegs; }
+    IOPCIDevice             *getPCIDevice(void) const { return fPCIDevice; }
+
+    /*
+     * ─────────────────────────────────────
+     *  Safe Lazy Interrupt Init
+     * ─────────────────────────────────────
+     */
+
+    /*!
+     * @brief  เริ่มต้น Interrupt แบบปลอดภัย (เรียกหลังจาก start() แล้ว)
+     *
+     *  หน่วงเวลา 2000 microseconds ก่อนเรียก initInterrupts()
+     *  เพื่อให้ Hardware Register เสถียรหลัง Kernel โหลด
+     *
+     *  ป้องกัน Kernel Hang ที่เกิดจาก Interrupt Controller
+     *  ยังไม่พร้อมตอน start()
+     *
+     * @return true = success
+     */
+    bool safeInitInterrupts(void);
+
+    /*!
+     * @brief  รับ Property Changes (ใช้เป็น Lazy Trigger)
+     *
+     *  เมื่อ IOFramebuffer หรือ User Space ตั้งค่า Property
+     *  → เรียก safeInitInterrupts() ถ้ายังไม่พร้อม
+     *
+     *  @param properties  Dictionary ของ properties ที่ส่งมา
+     *  @return kIOReturnSuccess หรือ error
+     */
+    virtual IOReturn setProperties(OSObject *properties) override;
+
 private:
 
     /*
@@ -494,6 +533,9 @@ private:
     /* Memory Map References — เก็บไว้เพื่อ release ใน stop() */
     IOMemoryDescriptor      *fMMIODesc;        /*!< BAR0 IOMemoryDescriptor */
     IOMemoryDescriptor      *fApertureDesc;    /*!< BAR2 IOMemoryDescriptor */
+
+    /* Framebuffer / Interrupt Manager */
+    class IntelFramebuffer  *fFramebuffer;     /*!< Child display/interrupt handler */
 };
 
 #endif /* __MY_INTEL_GPU_HPP__ */
