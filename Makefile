@@ -67,21 +67,29 @@ LDFLAGS = -r -keep_private_externs
 # ─── Sources ─────────────────────────────────────────────────────
 SRC = $(CLASS).cpp IntelFramebuffer.cpp
 OBJ = $(CLASS).o IntelFramebuffer.o
+HEADERS = $(CLASS).hpp IntelFramebuffer.hpp
 
 .PHONY: all clean install load unload
 
 all: $(TARGET).kext/Contents/MacOS/$(TARGET)
 
-# ─── Build kext bundle ──────────────────────────────────────────
-$(TARGET).kext/Contents/MacOS/$(TARGET): $(SRC) $(CLASS).hpp Info.plist
+# ─── Compile each .cpp to .o ──────────────────────────────────
+$(CLASS).o: $(CLASS).cpp $(HEADERS) Info.plist
+	$(CC) $(CXXFLAGS) -c -o $@ $(CLASS).cpp
+
+IntelFramebuffer.o: IntelFramebuffer.cpp $(HEADERS) Info.plist
+	$(CC) $(CXXFLAGS) -c -o $@ IntelFramebuffer.cpp
+
+# ─── Link .o files into kext binary ──────────────────────────
+$(TARGET).kext/Contents/MacOS/$(TARGET): $(OBJ) Info.plist
 	@mkdir -p $(TARGET).kext/Contents/MacOS
 	cp Info.plist $(TARGET).kext/Contents/Info.plist
-	$(CC) $(CXXFLAGS) $(LDFLAGS) -o $@ $(SRC)
+	$(CC) $(CXXFLAGS) $(LDFLAGS) -o $@ $(OBJ)
 	@echo "─── Build complete: $(TARGET).kext ───"
 
 # ─── Utilities ───────────────────────────────────────────────────
 clean:
-	rm -rf $(TARGET).kext $(OBJ)
+	rm -rf $(TARGET).kext $(OBJ) IntelFramebuffer.o
 
 install: all
 	sudo chown -R root:wheel $(TARGET).kext
