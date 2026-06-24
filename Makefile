@@ -65,8 +65,8 @@ CXXFLAGS = -std=c++11 \
 LDFLAGS = -r -keep_private_externs
 
 # ─── Sources ─────────────────────────────────────────────────────
-SRC = $(CLASS).cpp
-OBJ = $(CLASS).o
+SRC = $(CLASS).cpp IntelFramebuffer.cpp
+OBJ = $(CLASS).o IntelFramebuffer.o
 
 .PHONY: all clean install load unload
 
