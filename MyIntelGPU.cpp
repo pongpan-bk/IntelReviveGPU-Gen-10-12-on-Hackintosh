@@ -34,9 +34,35 @@
 #include <IOKit/IODeviceMemory.h>
 #include <stdint.h>
 
-/* KMOD_DECL — สร้างสัญลักษณ์ _kmod_info ที่ kmutil ต้องการ */
+/*
+ * _kmod_info — kmutil ต้องการสัญลักษณ์นี้เพื่อ load kext
+ *
+ * ใช้ KMOD_DECL ไม่ได้เพราะ name ต้องเป็น C identifier (token paste ##)
+ * แต่ bundle ID "com.myintelgpu.driver" มีจุด ทำให้ compile error
+ *
+ * วิธีแก้: define kmod_info_t struct โดยตรง ในรูปแบบเดียวกับ KMOD_DECL macro
+ *
+ * Struct layout (macOS 15.2 SDK):
+ *   1 = next             0
+ *   2 = info_version     KMOD_INFO_VERSION (=1)
+ *   3 = id               -1U (0xFFFFFFFF)
+ *   4 = name             "com.myintelgpu.driver"
+ *   5 = version          "1.0.0"
+ *   6 = reference_count  -1
+ *   7 = reference_list   0
+ *   8 = address          0
+ *   9 = size             0
+ *   10 = hdr_size         0
+ *   11 = start            myintelgpu_module_start
+ *   12 = stop             myintelgpu_module_stop
+ */
 extern "C" {
-    KMOD_DECL(com.myintelgpu.driver, "1.0.0")
+    static int myintelgpu_module_start(kmod_info_t *ki, void *data) { return 0; }
+    static int myintelgpu_module_stop(kmod_info_t *ki, void *data)  { return 0; }
+    kmod_info_t kmod_info = { 0, 1, -1U,                /* next, info_version, id */
+        "com.myintelgpu.driver", "1.0.0",              /* name, version */
+        -1, 0, 0, 0, 0,                               /* ref_count, ref_list, addr, size, hdr_size */
+        myintelgpu_module_start, myintelgpu_module_stop };
 }
 
 #ifndef kIOPCIMemorySpace64Bit
