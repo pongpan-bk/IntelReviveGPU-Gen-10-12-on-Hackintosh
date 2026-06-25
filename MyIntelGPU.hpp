@@ -456,6 +456,7 @@ public:
 
     /* Public Accessors สำหรับ child classes (IntelFramebuffer ฯลฯ) */
     IOMemoryMap             *getMMIOMap(void) const { return fMMIOMap; }
+    IOMemoryMap             *getApertureMap(void) const { return fApertureMap; }
     volatile uint8_t        *getRegs(void) const { return fRegs; }
     IOPCIDevice             *getPCIDevice(void) const { return fPCIDevice; }
 
@@ -488,6 +489,15 @@ public:
      *  @return kIOReturnSuccess หรือ error
      */
     virtual IOReturn setProperties(OSObject *properties) override;
+
+    /*!
+     * @brief  Vblank Event Notification
+     *
+     *  เรียกโดย IntelFramebuffer::handleInterrupt() เมื่อตรวจพบ
+     *  Vblank interrupt เพื่อส่งต่อให้ MyIntelFramebuffer::handleVblank()
+     *  → VSync event ไปยัง user space
+     */
+    void notifyVblank(void);
 
 private:
 
@@ -535,7 +545,11 @@ private:
     IOMemoryDescriptor      *fApertureDesc;    /*!< BAR2 IOMemoryDescriptor */
 
     /* Framebuffer / Interrupt Manager */
-    class IntelFramebuffer  *fFramebuffer;     /*!< Child display/interrupt handler */
+    class IntelFramebuffer    *fFramebuffer;       /*!< Phase 3: Interrupt handler */
+    class MyIntelFramebuffer  *fDisplayFramebuffer; /*!< Phase 4: IOFramebuffer binding */
+
+    /* Accessor for IntelFramebuffer (for interrupt wiring) */
+    IntelFramebuffer *getFramebuffer(void) const { return fFramebuffer; }
 };
 
 #endif /* __MY_INTEL_GPU_HPP__ */

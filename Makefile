@@ -55,8 +55,11 @@ CXXFLAGS = -std=c++11 \
            -fno-rtti \
            -DKERNEL \
            -D__STRICT_BSD__ \
+           -Wno-deprecated-declarations \
+           -Wno-inconsistent-missing-override \
            -I$(KERNEL_HDRS) \
            -I$(SDK_PATH)/System/Library/Frameworks/Kernel.framework/Headers \
+           -I$(SDK_PATH)/System/Library/Frameworks/IOGraphics.framework/Headers \
            -I$(SDK_PATH)/usr/include
 
 # ─── Linker Flags ────────────────────────────────────────────────
@@ -65,8 +68,8 @@ CXXFLAGS = -std=c++11 \
 LDFLAGS = -r -keep_private_externs
 
 # ─── Sources ─────────────────────────────────────────────────────
-SRC = MyIntelGPU.cpp IntelFramebuffer.cpp
-OBJ = MyIntelGPU.o IntelFramebuffer.o
+SRC = MyIntelGPU.cpp IntelFramebuffer.cpp MyIntelFramebuffer.cpp
+OBJ = MyIntelGPU.o IntelFramebuffer.o MyIntelFramebuffer.o
 
 .PHONY: all clean install load unload
 

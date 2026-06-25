@@ -709,11 +709,19 @@ void IntelFramebuffer::handleInterrupt(void)
 #endif
 
         /*
-         * TODO Phase 4: IOFramebuffer Binding
-         * — แจ้ง IOFramebuffer ว่ามี Vblank
-         * — อัปเดต frame counter / timestamp
-         * — ส่ง event ไปยัง user space (VSync)
+         * Phase 4: ส่ง Vblank Event ไปยัง IOFramebuffer
+         * — notifyVblank() → MyIntelFramebuffer::handleVblank()
+         *   → VblankEvent() → VSync ไปยัง user space
+         *
+         * Pipeline:
+         *   HW Interrupt → IntelFramebuffer::handleInterrupt()
+         *   → MyIntelGPU::notifyVblank()
+         *   → MyIntelFramebuffer::handleVblank()
+         *   → IOFramebuffer::VblankEvent() → mach port
          */
+        if (iir & GEN11_PIPE_VBLANK) {
+            fParent->notifyVblank();
+        }
     }
 
     /*

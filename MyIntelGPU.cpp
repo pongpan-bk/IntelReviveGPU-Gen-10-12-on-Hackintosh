@@ -27,6 +27,7 @@
 
 #include "MyIntelGPU.hpp"
 #include "IntelFramebuffer.hpp"
+#include "MyIntelFramebuffer.hpp"
 #include <libkern/libkern.h>
 #include <libkern/OSAtomic.h>
 #include <IOKit/IOLib.h>
@@ -131,6 +132,7 @@ bool MyIntelGPU::init(OSDictionary *dict)
     fMMIODesc     = NULL;
     fApertureDesc = NULL;
     fFramebuffer  = NULL;
+    fDisplayFramebuffer = NULL;
 
     /*
      * clear translation table ทั้งหมด
@@ -181,6 +183,11 @@ void MyIntelGPU::free()
     if (fFramebuffer) {
         fFramebuffer->release();
         fFramebuffer = NULL;
+    }
+
+    if (fDisplayFramebuffer) {
+        fDisplayFramebuffer->release();
+        fDisplayFramebuffer = NULL;
     }
 
     super::free();
@@ -1480,6 +1487,73 @@ bool MyIntelGPU::start(IOService *provider)
 
     /*
      * ============================================================
+     *  Phase 5d: MyIntelFramebuffer — IOFramebuffer Binding (Phase 4)
+     * ============================================================
+     *
+     *  สร้าง IOFramebuffer subclass เพื่อให้ macOS มองเห็น framebuffer
+     *  จริงใน IORegistry (Phase 4)
+     *
+     *  MyIntelFramebuffer จะ:
+     *    1. Extend IOFramebuffer แทน IOService
+     *    2. ประกาศ display mode 1920x1080 @ 60Hz
+     *    3. สร้าง VRAM descriptor สำหรับ BAR2
+     *    4. publish properties ใน IORegistry
+     *    5. เชื่อม Vblank interrupt → VSync (Phase 3)
+     */
+    IODebug("Phase 5d: Creating MyIntelFramebuffer (IOFramebuffer)...");
+
+    fDisplayFramebuffer = new MyIntelFramebuffer;
+    if (fDisplayFramebuffer) {
+        /*
+         * init() — ตั้งค่า default state
+         */
+        if (!fDisplayFramebuffer->init(NULL)) {
+            IODebug("  ERROR: MyIntelFramebuffer::init() failed");
+            fDisplayFramebuffer->release();
+            fDisplayFramebuffer = NULL;
+        } else {
+            /*
+             * attachToParent — ผูกกับ IORegistry tree
+             * โดยใช้ provider (IOPCIDevice) เป็น parent
+             * เพื่อให้ framebuffer อยู่ใน hierarchy เดียวกับ GPU
+             */
+            if (!fDisplayFramebuffer->attachToParent(provider, gIOServicePlane)) {
+                IODebug("  WARNING: attachToParent failed — continuing");
+            }
+
+            /*
+             * start() — เริ่ม framebuffer lifecycle:
+             *   - รับ MyIntelGPU pointer (ผ่าน provider cast)
+             *   - setupDefaultMode()
+             *   - createVRAMDescriptor()
+             *   - publishIORegistryProperties()
+             *   - registerService()
+             */
+            if (!fDisplayFramebuffer->start(this)) {
+                IODebug("  ERROR: MyIntelFramebuffer::start() failed");
+                fDisplayFramebuffer->detachFromParent(provider, gIOServicePlane);
+                fDisplayFramebuffer->release();
+                fDisplayFramebuffer = NULL;
+            } else {
+                IODebug("  MyIntelFramebuffer started successfully");
+
+                /*
+                 * เชื่อม Vblank interrupt (Phase 3) → framebuffer VSync
+                 * safeInitInterrupts() จะ init interrupt system
+                 * และเมื่อ Vblank เกิด → handleInterrupt() → handleVblank()
+                 */
+                IODebug("  Starting interrupts (Phase 3 wiring)...");
+                safeInitInterrupts();
+            }
+        }
+    } else {
+        IODebug("  ERROR: Failed to allocate MyIntelFramebuffer");
+    }
+
+    IODebug("Phase 5d: IOFramebuffer binding phase complete");
+
+    /*
+     * ============================================================
      *  Phase 6: GGTT Basic Init
      * ============================================================
      *
@@ -1612,6 +1686,16 @@ void MyIntelGPU::stop(IOService *provider)
     }
 
     /*
+     * ปล่อย MyIntelFramebuffer (IOFramebuffer Binding)
+     */
+    if (fDisplayFramebuffer) {
+        fDisplayFramebuffer->stop(fDisplayFramebuffer->getProvider());
+        fDisplayFramebuffer->detachFromParent(fPCIDevice, gIOServicePlane);
+        fDisplayFramebuffer->release();
+        fDisplayFramebuffer = NULL;
+    }
+
+    /*
      * reset translation state
      */
     fTransCount = 0;
@@ -1729,6 +1813,31 @@ IOReturn MyIntelGPU::setProperties(OSObject *properties)
      * ส่งต่อไปยัง super class เพื่อให้ IOKit ประมวลผล property
      */
     return super::setProperties(properties);
+}
+
+#pragma mark -
+#pragma mark - notifyVblank
+
+/*
+ * ─────────────────────────────────────────────────────────────────
+ *  void MyIntelGPU::notifyVblank()
+ *
+ *  ส่ง Vblank Event ไปยัง MyIntelFramebuffer
+ *  — เรียกโดย IntelFramebuffer::handleInterrupt()
+ *    เมื่อตรวจพบ Vblank interrupt (Phase 3)
+ *
+ *  Flow:
+ *    HW Interrupt → IntelFramebuffer::handleInterrupt()
+ *    → MyIntelGPU::notifyVblank()
+ *    → MyIntelFramebuffer::handleVblank()
+ *    → VblankEvent() → VSync ไปยัง user space
+ *─────────────────────────────────────────────────────────────────
+ */
+void MyIntelGPU::notifyVblank(void)
+{
+    if (fDisplayFramebuffer) {
+        fDisplayFramebuffer->handleVblank();
+    }
 }
 
 #pragma mark -
