@@ -64,7 +64,8 @@ CXXFLAGS = -std=c++11 \
 
 # ─── Linker Flags ────────────────────────────────────────────────
 # -Xlinker -kext  : kext binary (MH_DYLIB with DYLIB_KEXT flag)
-LDFLAGS = -Xlinker -kext
+# -Xlinker -undefined -Xlinker dynamic_lookup : resolve IOKit/IOGraphics symbols at load time
+LDFLAGS = -Xlinker -kext -Xlinker -undefined -Xlinker dynamic_lookup
 
 # ─── Sources ─────────────────────────────────────────────────────
 SRC = MyIntelGPU.cpp IntelFramebuffer.cpp MyIntelFramebuffer.cpp
