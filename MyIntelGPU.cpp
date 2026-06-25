@@ -1349,8 +1349,8 @@ bool MyIntelGPU::start(IOService *provider)
         UInt32 hi = fPCIDevice->configRead32(kIOPCIConfigBaseAddress0 + 4);
         bool   is64 = ((lo & 0x06) == 0x04);
         UInt64 phys = is64
-            ? ((static_cast<UInt64>(hi & ~0xF) << 32) | (lo & ~0xF))
-            : (lo & ~0xF);
+            ? ((static_cast<UInt64>(hi & ~0xFU) << 32) | (lo & ~0xFU))
+            : (lo & ~0xFU);
         IODebug("BAR0: phys=0x%llX 64bit=%d", phys, is64);
         if (phys) {
             fMMIODesc = IOMemoryDescriptor::withPhysicalAddress(
