@@ -1296,6 +1296,13 @@ bool MyIntelGPU::start(IOService *provider)
     IODebug("Phase 1: PCI setup OK");
 
     /*
+     * ─── Fallback: kIOPCIConfigBaseAddress0 may not be defined in MacKernelSDK ───
+     */
+#ifndef kIOPCIConfigBaseAddress0
+#define kIOPCIConfigBaseAddress0  0x10
+#endif
+
+    /*
      * ============================================================
      *  Phase 2: BAR0 (MMIO) Mapping
      * ============================================================
@@ -1303,41 +1310,94 @@ bool MyIntelGPU::start(IOService *provider)
      * BAR0 = 64-bit prefetchable memory (MMIO registers)
      * ขนาด ≈ 2MB (0x200000) บน Gen9+
      *
-     * Linux:
-     *   intel_uncore_init_mmio():
-     *     i915->uncore.regs = ioremap(pci_resource_start(pdev, 0),
-     *                                 pci_resource_len(pdev, 0));
+     * macOS 15.2 VMware Guest note:
+     *   IOPCIDevice::mapDeviceMemoryWithRegister() may fail with
+     *   exclusive lock or bad flags.  Use getDeviceMemoryWithRegister()
+     *   + IOMemoryDescriptor::map() instead.
      *
-     * macOS IOKit:
-     *   mapDeviceMemoryWithIndex(0) → IOMemoryMap
-     *   → getVirtualAddress() = ioremap equivalent
+     * Descriptor strategies (in order):
+     *   1. getDeviceMemoryWithRegister(kIOPCIConfigBaseAddress0)
+     *   2. getDeviceMemoryWithIndex(0)
+     *   3. PCI config space raw physical address fallback
+     *
+     * Mapping strategies (in order):
+     *   1. IOMemoryDescriptor::map(kIOMapAnywhere | inhibit)
+     *   2. IOMemoryDescriptor::map(kIOMapAnywhere)
+     *   3. createMappingInTask(kernel_task, ...)  — legacy path
      */
-    fMMIODesc = fPCIDevice->getDeviceMemoryWithIndex(0);
+
+    /*
+     * ── Step 1: Get BAR0 memory descriptor ──
+     */
+    fMMIODesc = NULL;
+
+    /* Strategy A — register-based (PCI config offset) */
+    fMMIODesc = fPCIDevice->getDeviceMemoryWithRegister(kIOPCIConfigBaseAddress0);
+
+    /* Strategy B — index-based */
     if (!fMMIODesc) {
-        IODebug("ERROR: Cannot get BAR0 descriptor");
+        IODebug("BAR0: getDeviceMemoryWithRegister(0x%X) failed, "
+                "trying getDeviceMemoryWithIndex(0)",
+                kIOPCIConfigBaseAddress0);
+        fMMIODesc = fPCIDevice->getDeviceMemoryWithIndex(0);
+    }
+
+    /* Strategy C — PCI config space raw read */
+    if (!fMMIODesc) {
+        IODebug("BAR0: IOKit methods failed, reading PCI config space directly");
+        UInt32 lo = fPCIDevice->configRead32(kIOPCIConfigBaseAddress0);
+        UInt32 hi = fPCIDevice->configRead32(kIOPCIConfigBaseAddress0 + 4);
+        bool   is64 = ((lo & 0x06) == 0x04);
+        UInt64 phys = is64
+            ? ((static_cast<UInt64>(hi & ~0xF) << 32) | (lo & ~0xF))
+            : (lo & ~0xF);
+        IODebug("BAR0: phys=0x%llX 64bit=%d", phys, is64);
+        if (phys) {
+            fMMIODesc = IOMemoryDescriptor::withPhysicalAddress(
+                static_cast<IOPhysicalAddress>(phys),
+                0x200000, kIODirectionInOut);
+        }
+    }
+
+    if (!fMMIODesc) {
+        IODebug("ERROR: Cannot get BAR0 descriptor (all strategies)");
         goto fail;
     }
     fMMIODesc->retain();
+    IODebug("BAR0 desc: length=0x%llX", fMMIODesc->getLength());
 
     /*
-     * Map BAR0 ผ่าน IOMemoryMap
+     * ── Step 2: Map BAR0 into kernel address space ──
      *
-     * kIOMapInhibitCache = UC (uncacheable) — safe สำหรับ MMIO
-     * (register I/O ต้องไม่ cache เพราะ volatile)
+     * Avoid createMappingInTask(kernel_task, ...) on macOS 15+ —
+     * kernel_task is restricted → use IOMemoryDescriptor::map().
      */
-    fMMIOMap = fMMIODesc->createMappingInTask(
-                    kernel_task,
-                    kIOMapAnywhere | kIOMapInhibitCache,
-                    0,
-                    fMMIODesc->getLength());
+    {
+#if defined(kIOMapCacheInhibit)
+        const IOOptionBits kCacheInhibit = kIOMapCacheInhibit;
+#elif defined(kIOMapInhibitCache)
+        const IOOptionBits kCacheInhibit = kIOMapInhibitCache;
+#else
+        const IOOptionBits kCacheInhibit = (1UL << kIOMapCacheShift);
+#endif
+        fMMIOMap = fMMIODesc->map(kIOMapAnywhere | kCacheInhibit);
+        if (!fMMIOMap) {
+            IODebug("BAR0: map(UC) failed, retrying map(default)");
+            fMMIOMap = fMMIODesc->map(kIOMapAnywhere);
+        }
+        if (!fMMIOMap) {
+            IODebug("BAR0: map() failed, retrying createMappingInTask");
+            fMMIOMap = fMMIODesc->createMappingInTask(
+                kernel_task, kIOMapAnywhere, 0, fMMIODesc->getLength());
+        }
+    }
 
     if (!fMMIOMap) {
-        IODebug("ERROR: Cannot map BAR0 MMIO");
+        IODebug("ERROR: Cannot map BAR0 MMIO (all strategies)");
         goto fail;
     }
 
     fRegs = reinterpret_cast<volatile uint8_t *>(fMMIOMap->getVirtualAddress());
-
     IODebug("Phase 2: BAR0 MMIO mapped at 0x%p (size=0x%llX)",
             fRegs, fMMIODesc->getLength());
 
@@ -1402,12 +1462,24 @@ bool MyIntelGPU::start(IOService *provider)
              * Uncacheable (UC/InhibitCache):
              *   safe default — write ถึง bus ทันที
              *   แต่ bandwidth ต่ำกว่า WC ประมาณ 10x
+             *
+             * Fallback chain (same kernel_task restriction as BAR0):
+             *   1) createMappingInTask(kernel_task, ...) — original, may fail on macOS 15+
+             *   2) IOMemoryDescriptor::map(...) — no kernel_task dependency
              */
+#if defined(kIOMapCacheInhibit)
+            const IOOptionBits kApertureInhibit = kIOMapCacheInhibit;
+#elif defined(kIOMapInhibitCache)
+            const IOOptionBits kApertureInhibit = kIOMapInhibitCache;
+#else
+            const IOOptionBits kApertureInhibit = (1UL << kIOMapCacheShift);
+#endif
+
             IOOptionBits apertireFlags = kIOMapAnywhere;
             if (fFakeGen == 9 && fGraphicsVer != 9) {
                 apertireFlags |= kIOMapWriteCombined;
             } else {
-                apertireFlags |= kIOMapInhibitCache;
+                apertireFlags |= kApertureInhibit;
             }
 
             fApertureMap = fApertureDesc->createMappingInTask(
@@ -1415,6 +1487,18 @@ bool MyIntelGPU::start(IOService *provider)
                                apertireFlags,
                                0,
                                fApertureDesc->getLength());
+
+            /* Fallback: use map() instead of createMappingInTask */
+            if (!fApertureMap) {
+                IODebug("BAR2: createMappingInTask failed, trying map()");
+                fApertureMap = fApertureDesc->map(apertireFlags);
+            }
+
+            /* Fallback: remove cache inhibit flag */
+            if (!fApertureMap && (apertireFlags & kApertureInhibit)) {
+                IODebug("BAR2: map(UC/WC) failed, trying map(default)");
+                fApertureMap = fApertureDesc->map(kIOMapAnywhere);
+            }
 
             if (fApertureMap) {
                 fApertureVA = reinterpret_cast<volatile uint8_t *>(
