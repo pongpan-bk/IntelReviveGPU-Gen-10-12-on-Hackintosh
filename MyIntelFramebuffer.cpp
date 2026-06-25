@@ -303,27 +303,32 @@ bool MyIntelFramebuffer::createVRAMDescriptor(void)
     IOMemoryMap *apertureMap = fGPU->getApertureMap();
     uint64_t apertureSize = apertureMap ? apertureMap->getLength() : 0;
 
-    if (apertureMap && apertureSize > 0) {
-        fVRAMDescriptor = static_cast<IODeviceMemory *>(
-            IOMemoryDescriptor::withAddressRange(
-                apertureMap->getAddress(), apertureSize,
-                kIODirectionInOut, kernel_task).detach());
+    /*
+     * Keep at function scope: In macOS 15.2 SDK, withAddressRange returns
+     * OSPtr<IOMemoryDescriptor> (a class with destructor that releases).
+     * In MacKernelSDK, OSPtr is a raw pointer typedef — no destructor.
+     * auto handles both.
+     */
+    const bool haveAperture = (apertureMap && apertureSize > 0);
+    auto vramDesc = IOMemoryDescriptor::withAddressRange(
+                        haveAperture ? apertureMap->getAddress() : 0,
+                        haveAperture ? apertureSize : (16 * 1024 * 1024),
+                        kIODirectionInOut, kernel_task);
+
+    if (!vramDesc) {
+        FBLog("ERROR: Failed to create VRAM descriptor");
+        return false;
     }
 
-    if (!fVRAMDescriptor) {
-        FBLog("WARNING: No BAR2 - creating 16MB stub");
-        fVRAMDescriptor = static_cast<IODeviceMemory *>(
-            IOMemoryDescriptor::withAddressRange(
-                0, 16 * 1024 * 1024,
-                kIODirectionInOut, kernel_task).detach());
-    }
+    fVRAMDescriptor = static_cast<IODeviceMemory *>(vramDesc);
+    // retain permanent ref — vramDesc (OSPtr) releases at end of scope
+    // fVRAMDescriptor keeps the object alive after that
+    fVRAMDescriptor->retain();
 
-    if (fVRAMDescriptor) {
-        fVRAMDescriptor->retain();
-        FBLog("VRAM: 0x%llX bytes", fVRAMDescriptor->getLength());
-        return true;
-    }
-    return false;
+    FBLog("VRAM: 0x%llX bytes (%s)",
+          fVRAMDescriptor->getLength(),
+          haveAperture ? "BAR2" : "16MB stub");
+    return true;
 }
 
 void MyIntelFramebuffer::publishIORegistryProperties(void)
