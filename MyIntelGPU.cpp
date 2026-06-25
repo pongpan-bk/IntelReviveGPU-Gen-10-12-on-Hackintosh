@@ -34,6 +34,11 @@
 #include <IOKit/IODeviceMemory.h>
 #include <stdint.h>
 
+/* KMOD_DECL — สร้างสัญลักษณ์ _kmod_info ที่ kmutil ต้องการ */
+extern "C" {
+    KMOD_DECL(com.myintelgpu.driver, "1.0.0")
+}
+
 #ifndef kIOPCIMemorySpace64Bit
 #define kIOPCIMemorySpace64Bit 0x1000000000000000ULL
 #endif

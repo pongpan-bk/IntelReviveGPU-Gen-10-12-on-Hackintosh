@@ -63,9 +63,8 @@ CXXFLAGS = -std=c++11 \
            -I$(SDK_PATH)/usr/include
 
 # ─── Linker Flags ────────────────────────────────────────────────
-# -r              : relocatable object (kext = kernel module)
-# -keep_private_extern : keep private symbols for kext
-LDFLAGS = -r -keep_private_externs
+# -Xlinker -kext  : kext binary (MH_DYLIB with DYLIB_KEXT flag)
+LDFLAGS = -Xlinker -kext
 
 # ─── Sources ─────────────────────────────────────────────────────
 SRC = MyIntelGPU.cpp IntelFramebuffer.cpp MyIntelFramebuffer.cpp
