@@ -176,6 +176,16 @@
 #define PCH_DISPLAY_WINDOW     0x1000
 
 /*
+ * Kernel Virtual Address Boundary
+ *
+ * บน x86_64 macOS: kernel virtual addresses เริ่มต้นที่ 0xffffff8000000000
+ * (ใช้ตรวจสอบว่า fRegs (BAR0 mapping) อยู่ใน kernel space จริง
+ *  หรือเป็น 0x2000 แบบ VMware virtual GPU ที่ไม่มี BAR0)
+ */
+#define kMinKernelVA            0xFFFFFF80000000ULL
+#define kMaxKernelVA            0xFFFFFFFFFFFFFFFFULL
+
+/*
  * Register Offsets อื่น ๆ ที่สำคัญ
  */
 #define GMD_ID_GRAPHICS     0xD8C      /* Graphics Media Device ID register
@@ -459,6 +469,15 @@ public:
     IOMemoryMap             *getApertureMap(void) const { return fApertureMap; }
     volatile uint8_t        *getRegs(void) const { return fRegs; }
     IOPCIDevice             *getPCIDevice(void) const { return fPCIDevice; }
+
+    /**
+     * ตรวจสอบว่า fRegs อยู่ใน kernel virtual address space จริง
+     * (ป้องกัน VMware virtual GPU ที่ BAR0 map ได้ 0x2000)
+     */
+    bool isValidRegs(void) const {
+        uint64_t va = reinterpret_cast<uint64_t>(fRegs);
+        return (va >= kMinKernelVA && va <= kMaxKernelVA);
+    }
 
     /*
      * ─────────────────────────────────────

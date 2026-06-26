@@ -142,8 +142,9 @@ void IntelFramebuffer::clearAllInterruptRegisters(void)
 {
     FBLog("Clearing all pending display interrupts...");
 
-    if (!fParent || !fParent->getRegs()) {
-        FBLog("ERROR: parent or MMIO not ready");
+    if (!fParent || !fParent->getRegs() || !fParent->isValidRegs()) {
+        FBLog("ERROR: parent MMIO regs not in kernel space (fRegs=%p)",
+              fParent ? (void*)fParent->getRegs() : NULL);
         return;
     }
 
@@ -379,8 +380,9 @@ bool IntelFramebuffer::initInterrupts(MyIntelGPU *parent)
 
     fParent = parent;
 
-    if (!fParent->getRegs()) {
-        FBLog("ERROR: parent MMIO not mapped");
+    if (!fParent->getRegs() || !fParent->isValidRegs()) {
+        FBLog("ERROR: parent MMIO regs not in kernel space (fRegs=%p)",
+              (void*)fParent->getRegs());
         return false;
     }
 

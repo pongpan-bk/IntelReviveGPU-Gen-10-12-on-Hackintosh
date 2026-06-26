@@ -750,10 +750,15 @@ uint32_t MyIntelGPU::readReg32(uint32_t offset)
     realOffset = translateAddress(offset);
 
     /*
-     * ถ้า fRegs ยังไม่ถูก map → return 0xFF (all-ones = "no device")
+     * ถ้า fRegs ยังไม่ถูก map หรือ address ไม่ได้อยู่ใน kernel space
+     * → return 0xFF (all-ones = "no device")
+     *
+     * กรณี VMware virtual GPU: BAR0 map ได้ VA ต่ำๆ (เช่น 0x2000) → address ไม่ valid
+     * ต้อง guard ด้วย isValidRegs() ไม่ใช่แค่ NULL check
      */
-    if (!fRegs) {
-        IODebug("WARNING: readReg32(0x%04X) — fRegs is NULL", realOffset);
+    if (!isValidRegs()) {
+        IODebug("WARNING: readReg32(0x%04X) — invalid regs VA (fRegs=%p, va=0x%llX)",
+                realOffset, fRegs, reinterpret_cast<uint64_t>(fRegs));
         return 0xFFFFFFFF;
     }
 
@@ -816,9 +821,13 @@ void MyIntelGPU::writeReg32(uint32_t offset, uint32_t value)
      */
     realOffset = translateAddress(offset);
 
-    if (!fRegs) {
-        IODebug("WARNING: writeReg32(0x%04X, 0x%08X) — fRegs is NULL",
-                realOffset, value);
+    /*
+     * Guard: fRegs ต้องอยู่ใน kernel space
+     * (VMware virtual GPU map BAR0 ได้ VA ต่ำๆ ~0x2000 → invalid)
+     */
+    if (!isValidRegs()) {
+        IODebug("WARNING: writeReg32(0x%04X, 0x%08X) — invalid regs VA (fRegs=%p)",
+                realOffset, value, fRegs);
         return;
     }
 
@@ -1865,6 +1874,11 @@ bool MyIntelGPU::safeInitInterrupts(void)
 
     if (!fRegs) {
         IODebug("safeInitInterrupts: ERROR — MMIO not mapped");
+        return false;
+    }
+
+    if (!isValidRegs()) {
+        IODebug("safeInitInterrupts: ERROR — MMIO regs VA invalid (fRegs=%p, no real BAR0?)", fRegs);
         return false;
     }
 
