@@ -1,6 +1,5 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
- "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://apple.com">
 <plist version="1.0">
 <dict>
     <key>CFBundleDevelopmentRegion</key>
@@ -29,7 +28,7 @@
             <string>MyIntelGPU</string>
             <key>IOProviderClass</key>
             <string>IOPCIDevice</string>
-            <key>IOMatch</key>
+            <key>IOPCIPrimaryMatch</key>
             <string>0x46A08086 0x46A18086 0x46A68086 0x46B08086 0x46B18086 0xA7A08086 0xA7A18086 0xA7A88086 0xA7A98086 0xA7AA8086 0xA7AC8086</string>
         </dict>
     </dict>
